@@ -7,6 +7,201 @@ $ErrorActionPreference = "Stop"
 $InformationPreference = "Continue"
 Set-StrictMode -Version 2
 
+# Import Azure functions, but don't fail if we cant
+Import-Module AzTable -EA SilentlyContinue
+
+Class CertificateInfo
+{
+    CertificateInfo()
+    {
+    }
+
+    CertificateInfo([HashTable] $table)
+    {
+        $this.UpdateFromHashTable($table)
+    }
+
+    CertificateInfo([PSObject] $obj)
+    {
+        $this.UpdateFromObject($obj)
+    }
+
+    [HashTable] ToHashTable()
+    {
+        $table = @{}
+
+        ($this | Get-Member | Where-Object {$_.MemberType -eq "Property"}).Name | ForEach-Object {
+
+            $val = $null
+
+            switch ($_)
+            {
+                "Uri" {
+                    $val = [string]$this.$_
+                    break
+                }
+
+                default {
+                    $val = $this.$_
+                }
+            }
+
+            $table[$_] = $val
+        }
+
+        return $table
+    }
+
+    [void] UpdateFromObject([PSObject] $obj)
+    {
+        ($obj | Get-Member | Where-Object {$_.MemberType -eq "NoteProperty" -or $_.MemberType -eq "Property"}).Name | ForEach-Object {
+            if (($this | Get-Member | Where-Object {$_.MemberType -eq "Property"}).Name -contains $_)
+            {
+                $this.$_ = $obj.$_
+            }
+        }
+    }
+
+    [void] UpdateFromHashTable([HashTable] $table)
+    {
+        $table.Keys | ForEach-Object {
+            if (($this | Get-Member | Where-Object {$_.MemberType -eq "Property"}).Name -contains $_)
+            {
+                $this.$_ = $table[$_]
+            }
+        }
+    }
+
+    [int] DaysRemaining()
+    {
+        return [Math]::Round(($this.NotAfter - [DateTime]::Now).TotalDays, 2)
+    }
+
+    [int] DaysSinceLastCheck()
+    {
+        return [Math]::Round(($this.LastChecked - [DateTime]::Now).TotalDays, 2)
+    }
+
+    [bool] IsDateValid()
+    {
+        if ([DateTime]::Now -lt $this.NotBefore -or [DateTime]::Now -gt $this.NotAfter)
+        {
+            return $false
+        }
+
+        return $true
+    }
+
+    [Uri]$Uri = [string]::Empty
+    [bool]$Connected = $false
+    [DateTime]$LastChecked
+    [string]$Subject = [string]::Empty
+    [string]$Issuer = [string]::Empty
+    [DateTime]$NotBefore
+    [DateTime]$NotAfter
+    # [string]$DaysRemaining = $null
+    [string]$Thumbprint = [string]::Empty
+    # [string]$DateValid = $null
+    [bool]$LocallyTrusted = $false
+    # [HashTable]$Extensions = @{}
+    [string]$SAN = [string]::Empty
+    # [System.Security.Cryptography.X509Certificates.X509Certificate2]$Raw = $null
+}
+
+# Function New-CertificateInfo
+# {
+#     [CmdletBinding()]
+#     param(
+#         [Parameter(Mandatory=$false)]
+#         [ValidateNotNull()]
+#         $Source
+#     )
+
+#     process
+#     {
+#         $info = New-Object CertificateInfo
+
+#         if ($null -ne $Source)
+#         {
+#             ($info | Get-Member).Name | ForEach-Object {
+#                 $targetName = $_
+
+#                 if (($Source | Get-Member).Name -contains $targetName)
+#                 {
+#                     switch ($targetName)
+#                     {
+#                         "Uri" {
+#                             break
+#                         }
+
+#                         "Subject" {
+#                             break
+#                         }
+
+#                         "Issuer" {
+#                             break
+#                         }
+
+#                         "NotBefore" {
+#                             break
+#                         }
+
+#                         "NotAfter" {
+#                             break
+#                         }
+
+#                         "Thumbprint" {
+#                             break
+#                         }
+
+#                         "LocallyTrusted" {
+#                             break
+#                         }
+
+#                         "Extensions" {
+#                             break
+#                         }
+
+#                         "SAN" {
+#                             break
+#                         }
+
+#                         "Raw" {
+#                             break
+#                         }
+#                     }
+#                 }
+#             }
+#         }
+#     }
+# }
+
+<#
+#>
+# Function script:New-EndpointHashTable
+# {
+#     [CmdletBinding()]
+#     param()
+
+#     process
+#     {
+#         [ordered]@{
+#             Uri = [String]::Empty
+#             Subject = $null
+#             Issuer = $null
+#             NotBefore = $null
+#             NotAfter = $null
+#             DaysRemaining = $null
+#             Thumbprint = $null
+#             DateValid = $null
+#             LocallyTrusted = $null
+#             Extensions = $null
+#             SAN = $null
+#             Raw = $null
+#         }
+#     }
+# }
+
 <#
 #>
 Function Get-EndpointCertificate
@@ -70,10 +265,10 @@ Function Get-EndpointCertificate
                     $runspace = $_
 
                     try {
-                        $result = $runspace.Runspace.EndInvoke($runspace.Status)
+                        $result = $runspace.Runspace.EndInvoke($runspace.Status) | Select-Object -First 1
 
                         # Pass $result on in the pipeline
-                        $result
+                        [CertificateInfo]::New($result)
                     } catch {
                         Write-Warning "Error reading return from runspace job: $_"
                     }
@@ -106,22 +301,9 @@ Function Get-EndpointCertificate
             # Every certificate is valid for this check
             $certValidation = { $true }
 
-            $startTime = [DateTime]::Now
+            # Build status object
             $status = @{
-                Uri = $Uri.ToString()
-                Connected = $false
-                CheckTime = $null
-                Subject = $null
-                Issuer = $null
-                NotBefore = $null
-                NotAfter = $null
-                DaysRemaining = $null
-                Thumbprint = $null
-                DateValid = $null
-                LocalVerify = $null
-                Extensions = $null
-                SAN = $null
-                Raw = $null
+                Uri = $Uri
             }
 
             $client = $null
@@ -172,15 +354,16 @@ Function Get-EndpointCertificate
 
                 # Generate an ease of use object, with original cert data
                 Write-Verbose ("{0}: Updating object" -f $Uri)
+                $status["LastChecked"] = [DateTime]::Now
                 $status["Connected"] = $true
                 $status["Subject"] = $cert.Subject
                 $status["Issuer"] = $cert.Issuer
                 $status["NotBefore"] = $cert.NotBefore
                 $status["NotAfter"] = $cert.NotAfter
-                $status["DaysRemaining"] = [Math]::Round((($cert.NotAfter - [DateTime]::Now).TotalDays), 2)
+                # $status["DaysRemaining"] = [Math]::Round((($cert.NotAfter - [DateTime]::Now).TotalDays), 2)
                 $status["Thumbprint"] = $cert.Thumbprint
-                $status["DateValid"] = ($cert.NotAfter -gt [DateTime]::Now -and $cert.NotBefore -lt [DateTime]::Now)
-                $status["LocalVerify"] = $cert.Verify()
+                # $status["DateValid"] = ($cert.NotAfter -gt [DateTime]::Now -and $cert.NotBefore -lt [DateTime]::Now)
+                $status["LocallyTrusted"] = $cert.Verify()
                 $status["Extensions"] = $extensions
                 $status["SAN"] = $san
                 $status["Raw"] = $cert
@@ -199,8 +382,7 @@ Function Get-EndpointCertificate
             }
 
             # Return the state object
-            $status["CheckTime"] = (([DateTime]::Now - $startTime).TotalSeconds)
-            [PSCustomObject]$status
+            $status
         }
     }
 
@@ -244,12 +426,12 @@ Function Format-CertificateReport
     param(
         [Parameter(Mandatory=$true,ValueFromPipeline)]
         [ValidateNotNull()]
-        [PSCustomObject]$CertificateInfo
+        [CertificateInfo]$CertificateInfo
     )
 
     begin
     {
-        $info = New-Object 'System.Collections.Generic.List[PSCustomObject]'
+        $info = New-Object 'System.Collections.Generic.List[CertificateInfo]'
     }
 
     process
@@ -262,22 +444,119 @@ Function Format-CertificateReport
         Write-Information "Endpoints that failed checking"
         Write-Information "================"
         Write-Information ""
-        ($info | Where-Object {$_.Connected -eq $false}).Uri
+        ($info | Where-Object {$_.Connected -eq $false}).Uri | ForEach-Object { $_.ToString() }
+        Write-Information ""
 
         Write-Information "Endpoints with an invalid certificate (failed validation or date out of range)"
         Write-Information "================"
         Write-Information ""
-        $info | Where-Object {$_.LocalVerify -eq $false -or $_.DateValid -eq $false} | Format-Table -Property Uri,Subject,Issuer,DaysRemaining,LocalVerify
+        $info | Where-Object {$_.Connected -eq $true -and ($_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false)} |
+            Format-List -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},LocallyTrusted
+        Write-Information ""
 
-        $valid = $info | Where-Object {$_.LocalVerify -eq $true -and $_.DateValid -eq $true}
+        $valid = $info | Where-Object {$_.Connected -and ($_.LocallyTrusted -eq $true -and $_.IsDateValid() -eq $true)}
         Write-Information "Valid endpoints expiring within 90 days"
         Write-Information "================"
         Write-Information ""
-        $valid | Where-Object {$_.NotAfter -lt ([DateTime]::Now.AddDays(90))} | Sort-Object -Property DaysRemaining | Format-Table -Property Uri,Subject,Issuer,DaysRemaining,NotAfter
+        $valid | Where-Object {$_.NotAfter -lt ([DateTime]::Now.AddDays(90))} |
+            Sort-Object -Property DaysRemaining |
+            Format-List -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter
+        Write-Information ""
 
         Write-Information "All other valid endpoints"
         Write-Information "================"
         Write-Information ""
-        $valid | Where-Object {$_.NotAfter -ge ([DateTime]::Now.AddDays(90))} | Sort-Object -Property DaysRemaining | Format-Table -Property Uri,Subject,Issuer,DaysRemaining,NotAfter
+        $valid | Where-Object {$_.NotAfter -ge ([DateTime]::Now.AddDays(90))} |
+            Sort-Object -Property DaysRemaining |
+            Format-List -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter
+        Write-Information ""
+    }
+}
+
+<#
+#>
+Function Get-EndpointsFromAzureTableStorage
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$Table,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Partition = "primary"
+    )
+
+    process
+    {
+        # Retrieve all rows for this partition
+        Get-AzTableRow -Table $Table -Partition $Partition | ForEach-Object {
+            $row = $_
+
+            # Extract properties from the row and populate the status object
+            $info = [CertificateInfo]::New($row)
+
+            # Extract the Uri from the RowKey
+            $bytes = [Convert]::FromBase64String($row.RowKey)
+            $uri = [System.Text.Encoding]::Unicode.GetString($bytes)
+
+            # Check Uri
+            try {
+                $testUri = [Uri]::New($uri)
+
+                if ([string]::IsNullOrEmpty($testUri.Host) -or $testUri.Port -eq 0)
+                {
+                    Write-Warning "Missing host and/or port in Uri: $uri"
+                } else {
+                    $info.Uri = $testUri
+                    $info
+                }
+            } catch {
+                Write-Warning "Invalid format for uri: $uri"
+            }
+        }
+    }
+}
+
+<#
+#>
+Function Update-EndpointsInAzureTableStorage
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$Table,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Partition = "primary",
+
+        [Parameter(Mandatory=$true,ValueFromPipeline)]
+        [ValidateNotNull()]
+        [CertificateInfo]$Update
+    )
+
+    process
+    {
+        $uri = $Update.Uri
+        # Check for host and port
+        if ([string]::IsNullOrEmpty($uri.Host) -or $uri.Port -eq 0)
+        {
+            Write-Error "Missing host and/or port in Uri"
+        }
+
+        $status = $Update.ToHashTable()
+
+        # Rewrite/transform uri to base64 encoding
+        $bytes = [System.Text.Encoding]::Unicode.GetBytes($uri)
+        $rowKey = [Convert]::ToBase64String($bytes)
+
+        # Add/Update the row
+        Write-Verbose "Updating Partition($Partition) RowKey($rowKey)"
+        Write-Verbose "Properties: "
+        Write-Verbose ([PSCustomObject]$status | ConvertTo-Json)
+        Add-AzTableRow -Table $table -PartitionKey $Partition -RowKey $rowKey -Property $status -UpdateExisting | Out-Null
     }
 }
