@@ -8,12 +8,25 @@ $InformationPreference = "Continue"
 Set-StrictMode -Version 2
 
 # Import Azure functions, but don't fail if we cant
+# All Azure Tables code should be in a separate module, but is here for the moment
+# Not requiring AzTable allows the module to be imported for systems that
+# wont use Azure functionality and don't have AzTable installed
 Import-Module AzTable -EA SilentlyContinue
 
 Class CertificateInfo
 {
     CertificateInfo()
     {
+    }
+
+    CertificateInfo([string] $uri)
+    {
+        $this.Uri = [Uri]::New($uri)
+    }
+
+    CertificateInfo([Uri] $uri)
+    {
+        $this.Uri = [Uri]::New($uri)
     }
 
     CertificateInfo([HashTable] $table)
@@ -31,22 +44,7 @@ Class CertificateInfo
         $table = @{}
 
         ($this | Get-Member | Where-Object {$_.MemberType -eq "Property"}).Name | ForEach-Object {
-
-            $val = $null
-
-            switch ($_)
-            {
-                "Uri" {
-                    $val = [string]$this.$_
-                    break
-                }
-
-                default {
-                    $val = $this.$_
-                }
-            }
-
-            $table[$_] = $val
+            $table[$_] = [string]($this.$_)
         }
 
         return $table
@@ -57,7 +55,31 @@ Class CertificateInfo
         ($obj | Get-Member | Where-Object {$_.MemberType -eq "NoteProperty" -or $_.MemberType -eq "Property"}).Name | ForEach-Object {
             if (($this | Get-Member | Where-Object {$_.MemberType -eq "Property"}).Name -contains $_)
             {
-                $this.$_ = $obj.$_
+                $val = $null
+
+                switch ($_)
+                {
+                    "Uri" {
+                        $val = [Uri]::New($obj.$_.ToString())
+                        break
+                    }
+
+                    "Connected" {
+                        $val = [bool]::Parse($obj.$_.ToString())
+                        break
+                    }
+
+                    "LocallyTrusted" {
+                        $val = [bool]::Parse($obj.$_.ToString())
+                        break
+                    }
+
+                    default {
+                        $val = $obj.$_
+                    }
+                }
+
+                $this.$_ = $val
             }
         }
     }
@@ -67,7 +89,31 @@ Class CertificateInfo
         $table.Keys | ForEach-Object {
             if (($this | Get-Member | Where-Object {$_.MemberType -eq "Property"}).Name -contains $_)
             {
-                $this.$_ = $table[$_]
+                $val = $null
+
+                switch ($_)
+                {
+                    "Uri" {
+                        $val = [Uri]::New($table[$_].ToString())
+                        break
+                    }
+
+                    "Connected" {
+                        $val = [bool]::Parse($table[$_].ToString())
+                        break
+                    }
+
+                    "LocallyTrusted" {
+                        $val = [bool]::Parse($table[$_].ToString())
+                        break
+                    }
+
+                    default {
+                        $val = $table[$_]
+                    }
+                }
+
+                $this.$_ = $val
             }
         }
     }
@@ -77,9 +123,14 @@ Class CertificateInfo
         return [Math]::Round(($this.NotAfter - [DateTime]::Now).TotalDays, 2)
     }
 
-    [int] DaysSinceLastCheck()
+    [int] DaysSinceLastAttempt()
     {
-        return [Math]::Round(($this.LastChecked - [DateTime]::Now).TotalDays, 2)
+        return [Math]::Round(($this.LastAttempt - [DateTime]::Now).TotalDays, 2)
+    }
+
+    [int] DaysSinceLastConnect()
+    {
+        return [Math]::Round(($this.LastConnect - [DateTime]::Now).TotalDays, 2)
     }
 
     [bool] IsDateValid()
@@ -94,113 +145,18 @@ Class CertificateInfo
 
     [Uri]$Uri = [string]::Empty
     [bool]$Connected = $false
-    [DateTime]$LastChecked
+    [DateTime]$LastAttempt
+    [DateTime]$LastConnect
+
     [string]$Subject = [string]::Empty
     [string]$Issuer = [string]::Empty
     [DateTime]$NotBefore
     [DateTime]$NotAfter
-    # [string]$DaysRemaining = $null
     [string]$Thumbprint = [string]::Empty
-    # [string]$DateValid = $null
     [bool]$LocallyTrusted = $false
-    # [HashTable]$Extensions = @{}
     [string]$SAN = [string]::Empty
-    # [System.Security.Cryptography.X509Certificates.X509Certificate2]$Raw = $null
+    [string]$Extensions = [string]::Empty
 }
-
-# Function New-CertificateInfo
-# {
-#     [CmdletBinding()]
-#     param(
-#         [Parameter(Mandatory=$false)]
-#         [ValidateNotNull()]
-#         $Source
-#     )
-
-#     process
-#     {
-#         $info = New-Object CertificateInfo
-
-#         if ($null -ne $Source)
-#         {
-#             ($info | Get-Member).Name | ForEach-Object {
-#                 $targetName = $_
-
-#                 if (($Source | Get-Member).Name -contains $targetName)
-#                 {
-#                     switch ($targetName)
-#                     {
-#                         "Uri" {
-#                             break
-#                         }
-
-#                         "Subject" {
-#                             break
-#                         }
-
-#                         "Issuer" {
-#                             break
-#                         }
-
-#                         "NotBefore" {
-#                             break
-#                         }
-
-#                         "NotAfter" {
-#                             break
-#                         }
-
-#                         "Thumbprint" {
-#                             break
-#                         }
-
-#                         "LocallyTrusted" {
-#                             break
-#                         }
-
-#                         "Extensions" {
-#                             break
-#                         }
-
-#                         "SAN" {
-#                             break
-#                         }
-
-#                         "Raw" {
-#                             break
-#                         }
-#                     }
-#                 }
-#             }
-#         }
-#     }
-# }
-
-<#
-#>
-# Function script:New-EndpointHashTable
-# {
-#     [CmdletBinding()]
-#     param()
-
-#     process
-#     {
-#         [ordered]@{
-#             Uri = [String]::Empty
-#             Subject = $null
-#             Issuer = $null
-#             NotBefore = $null
-#             NotAfter = $null
-#             DaysRemaining = $null
-#             Thumbprint = $null
-#             DateValid = $null
-#             LocallyTrusted = $null
-#             Extensions = $null
-#             SAN = $null
-#             Raw = $null
-#         }
-#     }
-# }
 
 <#
 #>
@@ -209,8 +165,8 @@ Function Get-EndpointCertificate
     [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true,ValueFromPipeline)]
-        [ValidateNotNullOrEmpty()]
-        [Uri]$Uri,
+        [ValidateNotNull()]
+        [CertificateInfo]$CertInfo,
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNull()]
@@ -223,6 +179,7 @@ Function Get-EndpointCertificate
 
     begin
     {
+        # We'll verbose report on the total run time later on
         $beginTime = [DateTime]::Now
 
         # Create runspace environment
@@ -236,12 +193,14 @@ Function Get-EndpointCertificate
         $pool.Open()
 
         # Use a custom object so the wait block can replace the list with a new list
+        # (i.e. update the reference)
         $state = [PSCustomObject]@{
             runspaces = New-Object System.Collections.Generic.List[PSCustomObject]
         }
 
-        # Common wait block to use in process and end
+        # Common wait block to use to process finished runspaces
         # $target is the is the high count before we can schedule more checks
+        # script returns a hashtable of properties to update on the CertificateInfo object
         $waitScript = {
             param($state, $target)
 
@@ -267,7 +226,7 @@ Function Get-EndpointCertificate
                     try {
                         $result = $runspace.Runspace.EndInvoke($runspace.Status) | Select-Object -First 1
 
-                        # Pass $result on in the pipeline
+                        # Build and pass CertificateInfo on in the pipeline
                         [CertificateInfo]::New($result)
                     } catch {
                         Write-Warning "Error reading return from runspace job: $_"
@@ -293,6 +252,10 @@ Function Get-EndpointCertificate
                 [Int]$TimeoutSec = 10
             )
 
+            # Note - The check script runs in a runspace, so doesn't have implicit access
+            # to all of the types in the parent powershell scope. This script doesn't have
+            # access to the CertificateInfo type.
+
             # Global settings
             $InformationPreference = "Continue"
             $ErrorActionPreference = "Stop"
@@ -304,6 +267,9 @@ Function Get-EndpointCertificate
             # Build status object
             $status = @{
                 Uri = $Uri
+                LastAttempt = [DateTime]::Now
+                Connected = $false
+                LocallyTrusted = $false
             }
 
             $client = $null
@@ -343,6 +309,11 @@ Function Get-EndpointCertificate
                     $extensions[$asndata.Oid.FriendlyName] = $asndata.Format($false)
                 }
 
+                # Pack the extensions in to a string object
+                $extensionStr = $extensions.Keys | ForEach-Object {
+                    ("{0} = {1}" -f $_, $extensions[$_])
+                } | Join-String -Separator ([Environment]::Newline)
+
                 # Extract the SAN, if it is present
                 Write-Verbose ("{0}: checking for SAN extension" -f $Uri)
                 $san = [string]::Empty
@@ -352,21 +323,18 @@ Function Get-EndpointCertificate
                     $san = $extensions[$sanKey]
                 }
 
-                # Generate an ease of use object, with original cert data
+                # Update the hashtable with the entries we want to update on the CertificateInfo object
                 Write-Verbose ("{0}: Updating object" -f $Uri)
-                $status["LastChecked"] = [DateTime]::Now
                 $status["Connected"] = $true
+                $status["LastConnect"] = [DateTime]::Now
                 $status["Subject"] = $cert.Subject
                 $status["Issuer"] = $cert.Issuer
                 $status["NotBefore"] = $cert.NotBefore
                 $status["NotAfter"] = $cert.NotAfter
-                # $status["DaysRemaining"] = [Math]::Round((($cert.NotAfter - [DateTime]::Now).TotalDays), 2)
                 $status["Thumbprint"] = $cert.Thumbprint
-                # $status["DateValid"] = ($cert.NotAfter -gt [DateTime]::Now -and $cert.NotBefore -lt [DateTime]::Now)
                 $status["LocallyTrusted"] = $cert.Verify()
-                $status["Extensions"] = $extensions
+                $status["Extensions"] = $extensionStr
                 $status["SAN"] = $san
-                $status["Raw"] = $cert
             } catch {
                 Write-Information ("{0}: Failed to check endpoint: {1}" -f $Uri, $_)
             } finally {
@@ -392,10 +360,10 @@ Function Get-EndpointCertificate
         Invoke-Command -Script $waitScript -ArgumentList $state, ($ConcurrentChecks-1)
 
         # Schedule a run for this uri
-        Write-Verbose ("{0}: Scheduling check" -f $Uri)
+        Write-Verbose ("{0}: Scheduling check" -f $CertInfo.Uri)
         $runspace = [PowerShell]::Create()
         $runspace.AddScript($checkScript) | Out-Null
-        $runspace.AddParameter("Uri", $Uri) | Out-Null
+        $runspace.AddParameter("Uri", $CertInfo.Uri) | Out-Null
         $runspace.AddParameter("TimeoutSec", $TimeoutSec) | Out-Null
         $runspace.RunspacePool = $pool
 
@@ -411,6 +379,7 @@ Function Get-EndpointCertificate
         Write-Verbose "Waiting for remainder of runspaces to finish"
         Invoke-Command -Script $waitScript -ArgumentList $state, 0
 
+        # Close everything off
         $pool.Close()
         $pool.Dispose()
 
@@ -431,11 +400,14 @@ Function Format-CertificateReport
 
     begin
     {
+        # The function will accumulate the objects in to a list to report on
+        # in 'end'
         $info = New-Object 'System.Collections.Generic.List[CertificateInfo]'
     }
 
     process
     {
+        # Add the object to the list to report on once all objects have een received
         $info.Add($CertificateInfo) | Out-Null
     }
 
