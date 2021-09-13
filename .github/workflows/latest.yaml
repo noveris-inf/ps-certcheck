@@ -9,6 +9,7 @@ jobs:
   Build:
     name: "Build"
     runs-on: ubuntu-latest
+    environment: release
 
     steps:
       - name: Checkout
@@ -19,14 +20,13 @@ jobs:
       - name: Build
         shell: pwsh
         run: |
-          ./Build.ps1 -Stages Build,Test,Upload
+          ./Build.ps1 -Stages Build,Test,Push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCKER_USERNAME: ${{ github.actor }}
-          DOCKER_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          DOCKER_REGISTRY: docker.pkg.github.com
-          DOCKER_BASEPATH: ${{ github.repository }}
-          DOCKER_TAGS: "main-latest"
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+          DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
+          DOCKER_TAGS: "rolling"
 
   Linting:
     name: "Linting"

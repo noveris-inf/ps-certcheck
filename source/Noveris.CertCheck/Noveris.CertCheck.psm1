@@ -396,13 +396,17 @@ Function Get-EndpointCertificate
 
 <#
 #>
-Function Format-CertificateReport
+Function Format-EndpointCertificateReport
 {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true,ValueFromPipeline)]
         [ValidateNotNull()]
-        [CertificateInfo]$CertificateInfo
+        [CertificateInfo]$CertificateInfo,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [int]$AgeThresholdDays = 5
     )
 
     begin
@@ -420,34 +424,39 @@ Function Format-CertificateReport
 
     end
     {
-        Write-Information "Endpoints that failed checking"
+        $AgeThresholdDays = [Math]::Abs($AgeThresholdDays)
+
+        Write-Information "Endpoints not connected within last $AgeThresholdDays days or failed connection"
         Write-Information "================"
         Write-Information ""
-        ($info | Where-Object {$_.Connected -eq $false}).Uri | ForEach-Object { $_.ToString() }
+        $info | Where-Object {$_.Connected -eq $false -or $_.LastConnect -lt ([DateTime]::Now.AddDays(-$AgeThresholdDays))} |
+            Select-Object -Property Uri,Subject,LastAttempt,LastConnect,Connected,LastError
         Write-Information ""
 
-        Write-Information "Endpoints with an invalid certificate (failed validation or date out of range)"
+        # get all endpoint data where the endpoint could be queried
+        $connected = $info | Where-Object {$_.Connected}
+
+        Write-Information "Endpoints with an invalid certificate (untrusted or date out of range)"
         Write-Information "================"
         Write-Information ""
-        $info | Where-Object {$_.Connected -eq $true -and ($_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false)} |
-            Format-List -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},LocallyTrusted
+        $connected | Where-Object {$_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false} |
+        Select-Object -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},LocallyTrusted
         Write-Information ""
 
-        $valid = $info | Where-Object {$_.Connected -and ($_.LocallyTrusted -eq $true -and $_.IsDateValid() -eq $true)}
-        Write-Information "Valid endpoints expiring within 90 days"
+        Write-Information "All endpoints expiring within 90 days (Locally trusted or not)"
         Write-Information "================"
         Write-Information ""
-        $valid | Where-Object {$_.NotAfter -lt ([DateTime]::Now.AddDays(90))} |
-            Sort-Object -Property DaysRemaining |
-            Format-List -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter
+        $connected | Where-Object {$_.NotAfter -lt ([DateTime]::Now.AddDays(90))} |
+            Select-Object -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter,LocallyTrusted |
+            Sort-Object -Property NotAfter
         Write-Information ""
 
         Write-Information "All other valid endpoints"
         Write-Information "================"
         Write-Information ""
-        $valid | Where-Object {$_.NotAfter -ge ([DateTime]::Now.AddDays(90))} |
-            Sort-Object -Property DaysRemaining |
-            Format-List -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter
+        $connected | Where-Object {$_.NotAfter -ge ([DateTime]::Now.AddDays(90))} |
+            Select-Object -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter,LocallyTrusted |
+            Sort-Object -Property NotAfter
         Write-Information ""
     }
 }
@@ -464,13 +473,16 @@ Function Get-EndpointsFromAzureTableStorage
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNullOrEmpty()]
-        [string]$Partition = "primary"
+        [string]$Perspective = "global"
     )
 
     process
     {
+        # Only work on lowercase perspective name
+        $Perspective = $Perspective.ToLower()
+
         # Retrieve all rows for this partition
-        Get-AzTableRow -Table $Table -Partition $Partition | ForEach-Object {
+        Get-AzTableRow -Table $Table -Partition $Perspective | ForEach-Object {
             $row = $_
 
             # Extract properties from the row and populate the status object
@@ -510,7 +522,7 @@ Function Update-EndpointsInAzureTableStorage
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNullOrEmpty()]
-        [string]$Partition = "primary",
+        [string]$Perspective = "global",
 
         [Parameter(Mandatory=$true,ValueFromPipeline)]
         [ValidateNotNull()]
@@ -519,6 +531,9 @@ Function Update-EndpointsInAzureTableStorage
 
     process
     {
+        # Only work on lowercase perspective name
+        $Perspective = $Perspective.ToLower()
+
         $uri = $Update.Uri
         # Check for host and port
         if ([string]::IsNullOrEmpty($uri.Host) -or $uri.Port -eq 0)
@@ -533,9 +548,9 @@ Function Update-EndpointsInAzureTableStorage
         $rowKey = [Convert]::ToBase64String($bytes)
 
         # Add/Update the row
-        Write-Verbose "Updating Partition($Partition) RowKey($rowKey)"
+        Write-Verbose "Updating Partition($Perspective) RowKey($rowKey)"
         Write-Verbose "Properties: "
         Write-Verbose ([PSCustomObject]$status | ConvertTo-Json)
-        Add-AzTableRow -Table $table -PartitionKey $Partition -RowKey $rowKey -Property $status -UpdateExisting | Out-Null
+        Add-AzTableRow -Table $table -PartitionKey $Perspective -RowKey $rowKey -Property $status -UpdateExisting | Out-Null
     }
 }
