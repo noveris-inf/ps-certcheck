@@ -146,6 +146,8 @@ Class CertificateInfo
     [bool]$LocallyTrusted = $false
     [string]$SAN = [string]::Empty
     [string]$Extensions = [string]::Empty
+    [DateTime]$LastError
+    [string]$LastErrorMsg = [string]::Empty
 }
 
 <#
@@ -281,7 +283,7 @@ Function Get-EndpointCertificate
                     Write-Error ("{0}: Failed to connect" -f $Uri)
                 }
 
-                $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), false, $certValidation
+                $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false, $certValidation
 
                 # This supplies the SNI to the endpoint
                 Write-Verbose ("{0}: Sending SNI as {1}" -f $Uri, $Uri.Host)
@@ -296,13 +298,25 @@ Function Get-EndpointCertificate
                 Write-Verbose ("{0}: Unpacking certificate extensions" -f $Uri)
                 $extensions = @{}
                 $cert.Extensions | ForEach-Object {
+                    # Extract name. Use Oid if no friendly name
+                    $name = $_.Oid.Value
+                    if (![string]::IsNullOrEmpty($_.Oid.FriendlyName))
+                    {
+                        $name = $_.Oid.FriendlyName
+                    }
+
                     $asndata = New-Object 'System.Security.Cryptography.AsnEncodedData' -ArgumentList $_.Oid, $_.RawData
-                    $extensions[$asndata.Oid.FriendlyName] = $asndata.Format($false)
+                    $extensions[$name] = $asndata.Format($false)
                 }
 
                 # Pack the extensions in to a string object
                 $extensionStr = $extensions.Keys | ForEach-Object {
-                    ("{0} = {1}" -f $_, $extensions[$_])
+                    $val = $extensions[$_]
+                    if ([string]::IsNullOrEmpty($val))
+                    {
+                        $val = [string]::Empty
+                    }
+                    ("{0} = {1}" -f $_, $val)
                 } | Join-String -Separator ([Environment]::Newline)
 
                 # Extract the SAN, if it is present
@@ -327,7 +341,9 @@ Function Get-EndpointCertificate
                 $status["Extensions"] = $extensionStr
                 $status["SAN"] = $san
             } catch {
-                Write-Information ("{0}: Failed to check endpoint: {1}" -f $Uri, $_)
+                Write-Warning ("{0}: Failed to check endpoint: {1}" -f $Uri, $_)
+                $status["LastErrorMsg"] = [string]$_
+                $status["LastError"] = [DateTime]::Now
             } finally {
                 if ($null -ne $stream)
                 {
