@@ -44,7 +44,20 @@ Class CertificateInfo
         $table = @{}
 
         ($this | Get-Member | Where-Object {$_.MemberType -eq "Property"}).Name | ForEach-Object {
-            $table[$_] = [string]($this.$_)
+            $prop = $_
+
+            switch ($this.$prop.GetType().FullName)
+            {
+                "System.DateTime" {
+                    $table[$prop] = $this.$prop.ToString("o")
+                    break
+                }
+
+                default {
+                    $table[$prop] = [string]($this.$prop)
+                    break
+                }
+            }
         }
 
         return $table
@@ -55,31 +68,7 @@ Class CertificateInfo
         ($obj | Get-Member | Where-Object {$_.MemberType -eq "NoteProperty" -or $_.MemberType -eq "Property"}).Name | ForEach-Object {
             if (($this | Get-Member | Where-Object {$_.MemberType -eq "Property"}).Name -contains $_)
             {
-                $val = $null
-
-                switch ($_)
-                {
-                    "Uri" {
-                        $val = [Uri]::New($obj.$_.ToString())
-                        break
-                    }
-
-                    "Connected" {
-                        $val = [bool]::Parse($obj.$_.ToString())
-                        break
-                    }
-
-                    "LocallyTrusted" {
-                        $val = [bool]::Parse($obj.$_.ToString())
-                        break
-                    }
-
-                    default {
-                        $val = $obj.$_
-                    }
-                }
-
-                $this.$_ = $val
+                $this.UpdatePropertyFromString($_, $obj.$_.ToString())
             }
         }
     }
@@ -89,31 +78,32 @@ Class CertificateInfo
         $table.Keys | ForEach-Object {
             if (($this | Get-Member | Where-Object {$_.MemberType -eq "Property"}).Name -contains $_)
             {
-                $val = $null
+                $this.UpdatePropertyFromString($_, $table[$_].ToString())
+            }
+        }
+    }
 
-                switch ($_)
-                {
-                    "Uri" {
-                        $val = [Uri]::New($table[$_].ToString())
-                        break
-                    }
+    [void] UpdatePropertyFromString([string] $prop, [string] $val)
+    {
+        switch ($this.$prop.GetType().FullName)
+        {
+            "System.Uri" {
+                $this.$prop = [Uri]::New($val)
+                break
+            }
 
-                    "Connected" {
-                        $val = [bool]::Parse($table[$_].ToString())
-                        break
-                    }
+            "System.Boolean" {
+                $this.$prop = [bool]::Parse($val)
+                break
+            }
 
-                    "LocallyTrusted" {
-                        $val = [bool]::Parse($table[$_].ToString())
-                        break
-                    }
+            "System.DateTime" {
+                $this.$prop = [DateTime]::Parse($val)
+                break
+            }
 
-                    default {
-                        $val = $table[$_]
-                    }
-                }
-
-                $this.$_ = $val
+            default {
+                $this.$prop = $val
             }
         }
     }
@@ -230,6 +220,7 @@ Function Get-EndpointCertificate
                         [CertificateInfo]::New($result)
                     } catch {
                         Write-Warning "Error reading return from runspace job: $_"
+                        Write-Warning ($_ | fl -property * | Out-String)
                     }
 
                     $runspace.Runspace.Dispose()
