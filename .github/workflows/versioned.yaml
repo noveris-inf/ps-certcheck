@@ -8,6 +8,7 @@ jobs:
   Release:
     name: "Release"
     runs-on: ubuntu-latest
+    environment: release
 
     steps:
       - name: Checkout
@@ -18,11 +19,10 @@ jobs:
       - name: Release
         shell: pwsh
         run: |
-          ./Build.ps1 -Stages Build,Test,Upload,Release
+          ./Build.ps1 -Stages Build,Test,Release,Push,Publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCKER_USERNAME: ${{ github.actor }}
-          DOCKER_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          DOCKER_REGISTRY: docker.pkg.github.com
-          DOCKER_BASEPATH: ${{ github.repository }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+          DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
           DOCKER_TAGS: "latest"

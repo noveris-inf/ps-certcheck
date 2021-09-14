@@ -9,7 +9,6 @@
 
     # Supported PSEditions
     CompatiblePSEditions = @(
-        'Desktop',
         'Core'
     )
 
@@ -23,13 +22,13 @@
     CompanyName = 'Noveris Pty Ltd'
 
     # Copyright statement for this module
-    Copyright = '(c) 2019 Noveris Pty Ltd. All rights reserved.'
+    Copyright = '(c) 2021 Noveris Pty Ltd. All rights reserved.'
 
     # Description of the functionality provided by this module
     Description = 'Certificate Checker'
 
     # Minimum version of the Windows PowerShell engine required by this module
-    PowerShellVersion = '5.1'
+    PowerShellVersion = '6.0'
 
     # Name of the Windows PowerShell host required by this module
     # PowerShellHostName = ''
@@ -70,7 +69,10 @@
 
     # Functions to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no functions to export.
     FunctionsToExport = @(
-        'Get-EndpointCertificate'
+        'Get-EndpointCertificate',
+        'Format-EndpointCertificateReport',
+        'Get-EndpointsFromAzureTableStorage',
+        'Update-EndpointsInAzureTableStorage'
     )
 
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
