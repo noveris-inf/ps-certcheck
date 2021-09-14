@@ -138,6 +138,7 @@ Class CertificateInfo
     [DateTime]$LastAttempt
     [DateTime]$LastConnect
 
+    [string]$Perspective = [string]::Empty
     [string]$Subject = [string]::Empty
     [string]$Issuer = [string]::Empty
     [DateTime]$NotBefore
@@ -456,7 +457,7 @@ Function Format-EndpointCertificateReport
         Write-Information "================"
         Write-Information ""
         $info | Where-Object {$_.Connected -eq $false -or $_.LastConnect -lt ([DateTime]::Now.AddDays(-$AgeThresholdDays))} |
-            Select-Object -Property Uri,Subject,LastAttempt,LastConnect,Connected,LastError
+            Select-Object -Property Uri,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError
         Write-Information ""
 
         # get all endpoint data where the endpoint could be queried
@@ -466,14 +467,14 @@ Function Format-EndpointCertificateReport
         Write-Information "================"
         Write-Information ""
         $connected | Where-Object {$_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false} |
-        Select-Object -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},LocallyTrusted
+        Select-Object -Property Uri,Perspective,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},LocallyTrusted
         Write-Information ""
 
         Write-Information "All endpoints expiring within 90 days (Locally trusted or not)"
         Write-Information "================"
         Write-Information ""
         $connected | Where-Object {$_.NotAfter -lt ([DateTime]::Now.AddDays(90))} |
-            Select-Object -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter,LocallyTrusted |
+            Select-Object -Property Uri,Perspective,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter,LocallyTrusted |
             Sort-Object -Property NotAfter
         Write-Information ""
 
@@ -481,7 +482,7 @@ Function Format-EndpointCertificateReport
         Write-Information "================"
         Write-Information ""
         $connected | Where-Object {$_.NotAfter -ge ([DateTime]::Now.AddDays(90))} |
-            Select-Object -Property Uri,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter,LocallyTrusted |
+            Select-Object -Property Uri,Perspective,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter,LocallyTrusted |
             Sort-Object -Property NotAfter
         Write-Information ""
     }
@@ -499,27 +500,36 @@ Function Get-EndpointsFromAzureTableStorage
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNullOrEmpty()]
-        [string]$Perspective = "global"
+        [string]$Perspective
     )
 
     process
     {
-        # Only work on lowercase perspective name
-        $Perspective = $Perspective.ToLower()
+        # Args for Get-AzTableRow
+        $getArgs = @{
+            Table = $Table
+        }
 
-        # Retrieve all rows for this partition
-        Get-AzTableRow -Table $Table -Partition $Perspective | ForEach-Object {
+        # Refine to a perspective, if requested
+        if (![string]::IsNullOrEmpty($Perspective))
+        {
+            $getArgs["PartitionKey"] = $Perspective
+        }
+
+        # Get all rows, perhaps filtering to a perspective/partitionkey
+        Get-AzTableRow @getArgs | ForEach-Object {
             $row = $_
 
             # Extract properties from the row and populate the status object
             $info = [CertificateInfo]::New($row)
-
-            # Extract the Uri from the RowKey
-            $bytes = [Convert]::FromBase64String($row.RowKey)
-            $uri = [System.Text.Encoding]::Unicode.GetString($bytes)
+            $info.Perspective = $row.PartitionKey
 
             # Check Uri
             try {
+                # Extract the Uri from the RowKey
+                $bytes = [Convert]::FromBase64String($row.RowKey)
+                $uri = [System.Text.Encoding]::Unicode.GetString($bytes)
+
                 $testUri = [Uri]::New($uri)
 
                 if ([string]::IsNullOrEmpty($testUri.Host) -or $testUri.Port -eq 0)
@@ -530,7 +540,7 @@ Function Get-EndpointsFromAzureTableStorage
                     $info
                 }
             } catch {
-                Write-Warning "Invalid format for uri: $uri"
+                Write-Warning ("Invalid format for uri. Raw RowKey({0})" -f $row.RowKey)
             }
         }
     }
@@ -549,7 +559,7 @@ Function Update-EndpointsInAzureTableStorage
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNullOrEmpty()]
-        [string]$Perspective = "global",
+        [string]$Perspective,
 
         [Parameter(Mandatory=$true,ValueFromPipeline)]
         [ValidateNotNull()]
@@ -558,9 +568,6 @@ Function Update-EndpointsInAzureTableStorage
 
     process
     {
-        # Only work on lowercase perspective name
-        $Perspective = $Perspective.ToLower()
-
         $uri = $Update.Uri
         # Check for host and port
         if ([string]::IsNullOrEmpty($uri.Host) -or $uri.Port -eq 0)
@@ -570,6 +577,23 @@ Function Update-EndpointsInAzureTableStorage
 
         $status = $Update.ToHashTable()
 
+        # Determine PartitionKey
+        # Use the supplied Perspective. If empty, use the Perspective in the CertificateInfo
+        $partitionKey = $Perspective
+        if ([string]::IsNullOrEmpty($partitionKey) -and $status.Keys -contains "Perspective")
+        {
+            $partitionKey = $status["Perspective"]
+        }
+
+        # No supplied Perspective and no Perspective in the CertificateInfo object, so use "global"
+        if ([string]::IsNullOrEmpty($partitionKey))
+        {
+            $partitionKey = "global"
+        }
+
+        # Write it back to the status object so that the content in Azure Tables is consistent
+        $status["Perspective"] = $partitionKey
+
         # Rewrite/transform uri to base64 encoding
         $bytes = [System.Text.Encoding]::Unicode.GetBytes($uri)
         $rowKey = [Convert]::ToBase64String($bytes)
@@ -578,6 +602,6 @@ Function Update-EndpointsInAzureTableStorage
         Write-Verbose "Updating Partition($Perspective) RowKey($rowKey)"
         Write-Verbose "Properties: "
         Write-Verbose ([PSCustomObject]$status | ConvertTo-Json)
-        Add-AzTableRow -Table $table -PartitionKey $Perspective -RowKey $rowKey -Property $status -UpdateExisting | Out-Null
+        Add-AzTableRow -Table $table -PartitionKey $partitionKey -RowKey $rowKey -Property $status -UpdateExisting | Out-Null
     }
 }
