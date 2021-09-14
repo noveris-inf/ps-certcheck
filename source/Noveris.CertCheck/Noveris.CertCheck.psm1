@@ -145,6 +145,8 @@ Class CertificateInfo
     [string]$Thumbprint = [string]::Empty
     [bool]$LocallyTrusted = $false
     [string]$SAN = [string]::Empty
+    [string]$EKU = [string]::Empty
+    [string]$BasicConstraints = [string]::Empty
     [string]$Extensions = [string]::Empty
     [DateTime]$LastError
     [string]$LastErrorMsg = [string]::Empty
@@ -158,7 +160,7 @@ Function Get-EndpointCertificate
     param(
         [Parameter(Mandatory=$true,ValueFromPipeline)]
         [ValidateNotNull()]
-        [CertificateInfo]$CertInfo,
+        [CertificateInfo]$Endpoint,
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNull()]
@@ -257,6 +259,37 @@ Function Get-EndpointCertificate
             # Every certificate is valid for this check
             $certValidation = { $true }
 
+            # Script to retrieve certificate extensions
+            Function Get-CertificateExtension
+            {
+                [CmdletBinding()]
+                param(
+                    [Parameter(Mandatory=$true)]
+                    [ValidateNotNullOrEmpty()]
+                    [string]$KeyName,
+
+                    [Parameter(Mandatory=$true)]
+                    [ValidateNotNull()]
+                    [HashTable]$Extensions
+                )
+
+                process
+                {
+                    $content = [string]::Empty
+
+                    if ($Extensions.Keys -contains $KeyName)
+                    {
+                        $val = $Extensions[$KeyName]
+                        if ($null -ne $val)
+                        {
+                            $content = $val.ToString()
+                        }
+                    }
+
+                    $content
+                }
+            }
+
             # Build status object
             $status = @{
                 Uri = $Uri
@@ -319,15 +352,6 @@ Function Get-EndpointCertificate
                     ("{0} = {1}" -f $_, $val)
                 } | Join-String -Separator ([Environment]::Newline)
 
-                # Extract the SAN, if it is present
-                Write-Verbose ("{0}: checking for SAN extension" -f $Uri)
-                $san = [string]::Empty
-                $sanKey = "X509v3 Subject Alternative Name"
-                if ($extensions.Keys -contains $sanKey)
-                {
-                    $san = $extensions[$sanKey]
-                }
-
                 # Update the hashtable with the entries we want to update on the CertificateInfo object
                 Write-Verbose ("{0}: Updating object" -f $Uri)
                 $status["Connected"] = $true
@@ -339,7 +363,9 @@ Function Get-EndpointCertificate
                 $status["Thumbprint"] = $cert.Thumbprint
                 $status["LocallyTrusted"] = $cert.Verify()
                 $status["Extensions"] = $extensionStr
-                $status["SAN"] = $san
+                $status["SAN"] = Get-CertificateExtension -KeyName "X509v3 Subject Alternative Name" -Extensions $extensions
+                $status["EKU"] = Get-CertificateExtension -KeyName "X509v3 Extended Key Usage" -Extensions $extensions
+                $status["BasicConstraints"] = Get-CertificateExtension -KeyName "X509v3 Basic Constraints" -Extensions $extensions
             } catch {
                 Write-Warning ("{0}: Failed to check endpoint: {1}" -f $Uri, $_)
                 $status["LastErrorMsg"] = [string]$_
@@ -367,10 +393,10 @@ Function Get-EndpointCertificate
         Invoke-Command -Script $waitScript -ArgumentList $state, ($ConcurrentChecks-1)
 
         # Schedule a run for this uri
-        Write-Verbose ("{0}: Scheduling check" -f $CertInfo.Uri)
+        Write-Verbose ("{0}: Scheduling check" -f $Endpoint.Uri)
         $runspace = [PowerShell]::Create()
         $runspace.AddScript($checkScript) | Out-Null
-        $runspace.AddParameter("Uri", $CertInfo.Uri) | Out-Null
+        $runspace.AddParameter("Uri", $Endpoint.Uri) | Out-Null
         $runspace.AddParameter("TimeoutSec", $TimeoutSec) | Out-Null
         $runspace.RunspacePool = $pool
 
