@@ -433,7 +433,8 @@ Function Write-ReportSection
         [bool]$AsHtml,
 
         [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [PSObject[]]$Content,
 
         [Parameter(Mandatory=$true)]
@@ -452,7 +453,12 @@ Function Write-ReportSection
         {
             ("<b>{0}</b><br>" -f $Title)
             ("<i>{0}</i><br><p>" -f $Description)
-            $Content | ConvertTo-Html -As Table -Fragment
+            if ($null -ne $Content -and ($Content | Measure-Object).Count -gt 0)
+            {
+                $Content | ConvertTo-Html -As Table -Fragment
+            } else {
+                "No Content<br>"
+            }
             "<br>"
         } else {
             Write-Information $Title
@@ -513,7 +519,7 @@ Function Format-EndpointCertificateReport
         # Display endpoints that couldn't be contacted
         $results = $info | Where-Object {$_.Connected -eq $false -or $_.LastConnect -lt ([DateTime]::Now.AddDays(-$AgeThresholdDays))} |
             Select-Object -Property Uri,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError,LastErrorMsg
-        Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Unavailable endpoints" -Description "Endpoints not connected within last $AgeThresholdDays days or failed connection"
+        Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Inaccessible endpoints" -Description "Endpoints not connected within last $AgeThresholdDays days or failed connection"
 
         # get all endpoint data where the endpoint could be queried
         $connected = $info | Where-Object {$_.Connected}
@@ -525,7 +531,7 @@ Function Format-EndpointCertificateReport
         $results = $connected | Where-Object {$_.NotAfter -lt ([DateTime]::Now.AddDays(90))} |
             Select-Object -Property Uri,Perspective,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter,LocallyTrusted |
             Sort-Object -Property NotAfter
-        Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Expiring soon endpoints" -Description "All endpoints expiring within 90 days (Locally trusted or not)"
+        Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Endpoints expiring soon" -Description "All endpoints expiring within 90 days (Locally trusted or not)"
 
         if ($AsHTML)
         {
