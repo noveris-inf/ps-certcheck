@@ -423,6 +423,49 @@ Function Get-EndpointCertificate
 
 <#
 #>
+Function Write-ReportSection
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [bool]$AsHtml,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [PSObject[]]$Content,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [string]$Title,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [string]$Description
+    )
+
+    process
+    {
+        # Write title and description information
+        if ($AsHtml)
+        {
+            ("<b>{0}</b><br>" -f $Title)
+            ("<i>{0}</i><br><p>" -f $Description)
+            $Content | ConvertTo-Html -As Table -Fragment
+            "<br>"
+        } else {
+            Write-Information $Title
+            Write-Information "================"
+            Write-Information $Description
+            Write-Information ""
+            $Content
+            Write-Information ""
+        }
+    }
+}
+
+<#
+#>
 Function Format-EndpointCertificateReport
 {
     [CmdletBinding()]
@@ -433,7 +476,10 @@ Function Format-EndpointCertificateReport
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNull()]
-        [int]$AgeThresholdDays = 5
+        [int]$AgeThresholdDays = 5,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$AsHTML = $false
     )
 
     begin
@@ -453,38 +499,36 @@ Function Format-EndpointCertificateReport
     {
         $AgeThresholdDays = [Math]::Abs($AgeThresholdDays)
 
-        Write-Information "Endpoints not connected within last $AgeThresholdDays days or failed connection"
-        Write-Information "================"
-        Write-Information ""
-        $info | Where-Object {$_.Connected -eq $false -or $_.LastConnect -lt ([DateTime]::Now.AddDays(-$AgeThresholdDays))} |
-            Select-Object -Property Uri,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError
-        Write-Information ""
+        if ($AsHTML)
+        {
+            "<!DOCTYPE html PUBLIC `"-//W3C//DTD XHTML 1.0 Strict//EN`"  `"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd`">"
+            "<html xmlns=`"http://www.w3.org/1999/xhtml`">"
+            "<head>"
+            "<title>HTML TABLE</title>"
+            "</head><body>"
+        }
+
+        # Display endpoints that couldn't be contacted
+        $results = $info | Where-Object {$_.Connected -eq $false -or $_.LastConnect -lt ([DateTime]::Now.AddDays(-$AgeThresholdDays))} |
+            Select-Object -Property Uri,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError,LastErrorMsg
+        Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Unavailable endpoints" -Description "Endpoints not connected within last $AgeThresholdDays days or failed connection"
 
         # get all endpoint data where the endpoint could be queried
         $connected = $info | Where-Object {$_.Connected}
 
-        Write-Information "Endpoints with an invalid certificate (untrusted or date out of range)"
-        Write-Information "================"
-        Write-Information ""
-        $connected | Where-Object {$_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false} |
+        $results = $connected | Where-Object {$_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false} |
         Select-Object -Property Uri,Perspective,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},LocallyTrusted
-        Write-Information ""
+        Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Invalid certificates" -Description "Endpoints with an invalid certificate (untrusted or date out of range)"
 
-        Write-Information "All endpoints expiring within 90 days (Locally trusted or not)"
-        Write-Information "================"
-        Write-Information ""
-        $connected | Where-Object {$_.NotAfter -lt ([DateTime]::Now.AddDays(90))} |
+        $results = $connected | Where-Object {$_.NotAfter -lt ([DateTime]::Now.AddDays(90))} |
             Select-Object -Property Uri,Perspective,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter,LocallyTrusted |
             Sort-Object -Property NotAfter
-        Write-Information ""
+        Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Expiring soon endpoints" -Description "All endpoints expiring within 90 days (Locally trusted or not)"
 
-        Write-Information "All other valid endpoints"
-        Write-Information "================"
-        Write-Information ""
-        $connected | Where-Object {$_.NotAfter -ge ([DateTime]::Now.AddDays(90))} |
-            Select-Object -Property Uri,Perspective,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter,LocallyTrusted |
-            Sort-Object -Property NotAfter
-        Write-Information ""
+        if ($AsHTML)
+        {
+            "</body></html>"
+        }
     }
 }
 
