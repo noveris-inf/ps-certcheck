@@ -26,3 +26,4 @@ jobs:
           DOCKER_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
           DOCKER_REGISTRY: "docker.io"
           DOCKER_TAGS: "latest"
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
