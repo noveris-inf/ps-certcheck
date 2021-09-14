@@ -426,6 +426,7 @@ Function Get-EndpointCertificate
 Function Write-ReportSection
 {
     [CmdletBinding()]
+    [OutputType([string], [System.Management.Automation.PSObject[]])]
     param(
         [Parameter(Mandatory=$false)]
         [ValidateNotNull()]
@@ -469,6 +470,7 @@ Function Write-ReportSection
 Function Format-EndpointCertificateReport
 {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [Parameter(Mandatory=$true,ValueFromPipeline)]
         [ValidateNotNull()]
