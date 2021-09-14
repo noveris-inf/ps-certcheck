@@ -222,7 +222,7 @@ Function Get-EndpointCertificate
                         [CertificateInfo]::New($result)
                     } catch {
                         Write-Warning "Error reading return from runspace job: $_"
-                        Write-Warning ($_ | fl -property * | Out-String)
+                        Write-Warning ($_ | Format-List -property * | Out-String)
                     }
 
                     $runspace.Runspace.Dispose()
@@ -514,6 +514,7 @@ Function Get-EndpointsFromAzureTableStorage
 #>
 Function Update-EndpointsInAzureTableStorage
 {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)]
