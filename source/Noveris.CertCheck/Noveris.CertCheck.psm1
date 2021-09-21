@@ -13,6 +13,28 @@ Set-StrictMode -Version 2
 # wont use Azure functionality and don't have AzTable installed
 Import-Module AzTable -EA SilentlyContinue
 
+<#
+#>
+Function New-NormalisedUri
+{
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    [OutputType([System.Uri])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        $Obj
+    )
+
+    process
+    {
+        $tempUri = [Uri]::New($Obj.ToString())
+        $uri = [Uri]::New(("{0}://{1}:{2}" -f $tempUri.Scheme, $tempUri.Host, $tempUri.Port))
+
+        $uri
+    }
+}
+
 Class CertificateInfo
 {
     CertificateInfo()
@@ -21,12 +43,12 @@ Class CertificateInfo
 
     CertificateInfo([string] $uri)
     {
-        $this.Uri = [Uri]::New($uri)
+        $this.Uri = New-NormalisedUri $uri
     }
 
     CertificateInfo([Uri] $uri)
     {
-        $this.Uri = [Uri]::New($uri)
+        $this.Uri = New-NormalisedUri $uri
     }
 
     CertificateInfo([HashTable] $table)
@@ -88,7 +110,7 @@ Class CertificateInfo
         switch ($this.$prop.GetType().FullName)
         {
             "System.Uri" {
-                $this.$prop = [Uri]::New($val)
+                $this.$prop = New-NormalisedUri $val
                 break
             }
 
