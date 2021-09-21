@@ -17,7 +17,9 @@ Import-Module AzTable -EA SilentlyContinue
 #>
 Function New-NormalisedUri
 {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
+    [OutputType([System.Uri])]
     param(
         [Parameter(Mandatory=$true)]
         [ValidateNotNull()]
