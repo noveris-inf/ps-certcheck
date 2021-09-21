@@ -319,7 +319,6 @@ Function Get-EndpointCertificate
                 Uri = $Uri
                 LastAttempt = [DateTime]::Now
                 Connected = $false
-                LocallyTrusted = $false
             }
 
             $client = $null
@@ -393,7 +392,7 @@ Function Get-EndpointCertificate
                 $status["SAN"] = Get-CertificateExtension -KeyName "X509v3 Subject Alternative Name" -Extensions $extensions
                 $status["EKU"] = Get-CertificateExtension -KeyName "X509v3 Extended Key Usage" -Extensions $extensions
                 $status["BasicConstraints"] = Get-CertificateExtension -KeyName "X509v3 Basic Constraints" -Extensions $extensions
-                $status["Addresses"] = $addresses | ForEach-Object { $_.ToString()} | Join-String -Separator ", "
+                $status["Addresses"] = $addresses | ForEach-Object { $_.ToString()} | Join-String -Separator ([Environment]::Newline)
             } catch {
                 Write-Warning ("{0}: Failed to check endpoint: {1}" -f $Uri, $_)
                 $status["LastErrorMsg"] = [string]$_
