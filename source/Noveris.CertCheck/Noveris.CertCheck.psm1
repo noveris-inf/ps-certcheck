@@ -173,6 +173,7 @@ Class CertificateInfo
     [string]$Extensions = [string]::Empty
     [DateTime]$LastError
     [string]$LastErrorMsg = [string]::Empty
+    [string]$Addresses = [string]::Empty
 }
 
 <#
@@ -375,6 +376,9 @@ Function Get-EndpointCertificate
                     ("{0} = {1}" -f $_, $val)
                 } | Join-String -Separator ([Environment]::Newline)
 
+                # Get addresses for this endpoint
+                $addresses = [System.Net.DNS]::GetHostAddresses($Uri.Host)
+
                 # Update the hashtable with the entries we want to update on the CertificateInfo object
                 Write-Verbose ("{0}: Updating object" -f $Uri)
                 $status["Connected"] = $true
@@ -389,6 +393,7 @@ Function Get-EndpointCertificate
                 $status["SAN"] = Get-CertificateExtension -KeyName "X509v3 Subject Alternative Name" -Extensions $extensions
                 $status["EKU"] = Get-CertificateExtension -KeyName "X509v3 Extended Key Usage" -Extensions $extensions
                 $status["BasicConstraints"] = Get-CertificateExtension -KeyName "X509v3 Basic Constraints" -Extensions $extensions
+                $status["Addresses"] = $addresses | ForEach-Object { $_.ToString()} | Join-String -Separator ", "
             } catch {
                 Write-Warning ("{0}: Failed to check endpoint: {1}" -f $Uri, $_)
                 $status["LastErrorMsg"] = [string]$_
