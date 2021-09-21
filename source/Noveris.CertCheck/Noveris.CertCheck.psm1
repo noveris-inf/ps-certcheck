@@ -280,9 +280,6 @@ Function Get-EndpointCertificate
             $ErrorActionPreference = "Stop"
             Set-StrictMode -Version 2
 
-            # Every certificate is valid for this check
-            $certValidation = { $true }
-
             # Script to retrieve certificate extensions
             Function Get-CertificateExtension
             {
@@ -314,6 +311,98 @@ Function Get-EndpointCertificate
                 }
             }
 
+            Function Get-CertificateData
+            {
+                [CmdletBinding()]
+                param(
+                    [Parameter(Mandatory=$true)]
+                    [ValidateNotNull()]
+                    [Uri]$Uri,
+
+                    [Parameter(Mandatory=$false)]
+                    [ValidateNotNull()]
+                    [switch]$NoValidation,
+
+                    [Parameter(Mandatory=$false)]
+                    [ValidateNotNull()]
+                    [Int]$TimeoutSec = 10
+                )
+
+                process
+                {
+                    # 'No Validation' callback
+                    $certValidation = { $true }
+
+                    # stream and client for disposal later
+                    $client = $null
+                    $stream = $null
+
+                    # Status object to report on connection, auth and cert
+                    $status = [PSCustomObject]@{
+                        AuthSuccess = $false
+                        Connected = $false
+                        Certificate = $null
+                        Error = [string]::Empty
+                    }
+
+                    try {
+                        # Construct TcpClient and stream to target
+                        Write-Verbose ("{0}: Connecting" -f $Uri)
+                        $client = New-Object System.Net.Sockets.TcpClient
+
+                        # Tasks for connect and timeout
+                        $connect = $client.ConnectAsync($Uri.Host, $Uri.Port)
+                        $connect.Wait($TimeoutSec * 1000) | Out-Null
+
+                        # Check if we timed out
+                        if (!$connect.IsCompleted)
+                        {
+                            # Connect didn't finish in time
+                            Write-Error ("{0}: Failed to connect" -f $Uri)
+                        }
+
+                        # Update status
+                        $status.Connected = $true
+
+                        # Configure the SslStream connection
+                        $stream = $null
+                        if ($NoValidation)
+                        {
+                            $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false, $certValidation
+                        } else {
+                            $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false
+                        }
+
+                        # This supplies the SNI to the endpoint
+                        Write-Verbose ("{0}: Sending SNI as {1}" -f $Uri, $Uri.Host)
+                        $stream.AuthenticateAsClient($Uri.Host)
+
+                        # Update status
+                        $status.AuthSuccess = $true
+
+                        # Capture the remote certificate from the stream
+                        Write-Verbose ("{0}: Retrieving remote certificate" -f $Uri)
+                        $streamCert = $stream.RemoteCertificate
+                        $status.Certificate = New-Object 'System.Security.Cryptography.X509Certificates.X509Certificate2' -ArgumentList $streamCert
+                    } catch {
+                        $status.Error = $_.ToString()
+                    } finally {
+                        if ($null -ne $stream)
+                        {
+                            $stream.Dispose()
+                        }
+
+                        if ($null -ne $client)
+                        {
+                            $client.Dispose()
+                        }
+                    }
+
+                    # Return status object
+                    $status
+                }
+            }
+
             # Build status object
             $status = @{
                 Uri = $Uri
@@ -321,34 +410,36 @@ Function Get-EndpointCertificate
                 Connected = $false
             }
 
-            $client = $null
-            $stream = $null
             try {
-                # Construct TcpClient and stream to target
-                Write-Verbose ("{0}: Connecting" -f $Uri)
-                $client = New-Object System.Net.Sockets.TcpClient
+                # Get-CertificateData doesn't throw errors, just returns the status object
+                # Attempt to connect with certificate validation on first attempt
+                $connectStatus = Get-CertificateData -Uri $Uri -TimeoutSec $TimeoutSec
 
-                # Tasks for connect and timeout
-                $connect = $client.ConnectAsync($Uri.Host, $Uri.Port)
-                $connect.Wait($TimeoutSec * 1000) | Out-Null
-
-                # Check if we timed out
-                if (!$connect.IsCompleted)
+                # If we can't connect, just stop here
+                if (!$connectStatus.Connected)
                 {
-                    # Connect didn't finish in time
-                    Write-Error ("{0}: Failed to connect" -f $Uri)
+                    Write-Verbose "Coult not connect to endpoint"
+                    Write-Error $connectStatus.Error
                 }
 
-                $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false, $certValidation
+                $failedAuth = $false
+                if (!$connectStatus.AuthSuccess -or $null -eq $connectStatus.Certificate)
+                {
+                    # We connected, but failed authentication or didn't receive a certificate
+                    # Attempt to reconnect, but without validation of certificates
+                    Write-Verbose "Validation of remote endpoint failed. Reattempting without validation."
+                    $connectStatus = Get-CertificateData -Uri $Uri -TimeoutSec $TimeoutSec -NoValidation
+                    $failedAuth = $true
+                }
 
-                # This supplies the SNI to the endpoint
-                Write-Verbose ("{0}: Sending SNI as {1}" -f $Uri, $Uri.Host)
-                $stream.AuthenticateAsClient($Uri.Host)
+                if (!$connectStatus.AuthSuccess -or !$connectStatus.Connected -or $null -eq $connectStatus.Certificate)
+                {
+                    # Issue with connecting to the endpoint here. Can't continue
+                    Write-Verbose "Endpoint connectivity or auth failure"
+                    Write-Error $connectStatus.Error
+                }
 
-                # Capture the remote certificate from the stream
-                Write-Verbose ("{0}: Retrieving remote certificate" -f $Uri)
-                $streamCert = $stream.RemoteCertificate
-                $cert = New-Object 'System.Security.Cryptography.X509Certificates.X509Certificate2' -ArgumentList $streamCert
+                $cert = $connectStatus.Certificate
 
                 # Convert the extensions to friendly names with data
                 Write-Verbose ("{0}: Unpacking certificate extensions" -f $Uri)
@@ -387,7 +478,7 @@ Function Get-EndpointCertificate
                 $status["NotBefore"] = $cert.NotBefore
                 $status["NotAfter"] = $cert.NotAfter
                 $status["Thumbprint"] = $cert.Thumbprint
-                $status["LocallyTrusted"] = $cert.Verify()
+                $status["LocallyTrusted"] = !$failedAuth
                 $status["Extensions"] = $extensionStr
                 $status["SAN"] = Get-CertificateExtension -KeyName "X509v3 Subject Alternative Name" -Extensions $extensions
                 $status["EKU"] = Get-CertificateExtension -KeyName "X509v3 Extended Key Usage" -Extensions $extensions
@@ -397,16 +488,6 @@ Function Get-EndpointCertificate
                 Write-Warning ("{0}: Failed to check endpoint: {1}" -f $Uri, $_)
                 $status["LastErrorMsg"] = [string]$_
                 $status["LastError"] = [DateTime]::Now
-            } finally {
-                if ($null -ne $stream)
-                {
-                    $stream.Dispose()
-                }
-
-                if ($null -ne $client)
-                {
-                    $client.Dispose()
-                }
             }
 
             # Return the state object
