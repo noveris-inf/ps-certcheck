@@ -641,11 +641,52 @@ Function Format-EndpointCertificateReport
         $connected = $info | Where-Object {$_.Connected}
 
         $results = $connected | Where-Object {$_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false} |
-        Select-Object -Property Uri,Perspective,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},LocallyTrusted
+            Group-Object -Property Uri,Thumbprint | ForEach-Object {
+                $group = $_
+
+                # Determine all perspectives
+                $perspectives = $group.Group | ForEach-Object { $_.Perspective } | Select-Object -Unique |
+                    Join-String -Separator ", "
+
+                # Since thumbprint is the same for all in this group, we only need the cert information from the first object
+                $first = $group.Group | Select-Object -First 1
+
+                [PSCustomObject]@{
+                    Uri = $first.Uri
+                    Perspectives = $perspectives
+                    Subject = $first.Subject
+                    Issuer = $first.Issuer
+                    DaysRemaining = $first.DaysRemaining()
+                    # Locally Trusted is perspective based, so not guaranteed to be the same between separate checkers,
+                    # however this if filtered by 'LocallyTrusted -eq $false' above, so they should all be the same
+                    LocallyTrusted = $first.LocallyTrusted
+                }
+            }
         Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Invalid certificates" -Description "Endpoints with an invalid certificate (untrusted or date out of range)"
 
         $results = $connected | Where-Object {$_.NotAfter -lt ([DateTime]::Now.AddDays(90))} |
-            Select-Object -Property Uri,Perspective,Subject,Issuer,@{N="DaysRemaining";E={$_.DaysRemaining()}},NotAfter,LocallyTrusted |
+            Group-Object -Property Uri,Thumbprint | ForEach-Object {
+                $group = $_
+
+                # Determine all perspectives
+                $perspectives = $group.Group | ForEach-Object { $_.Perspective } | Select-Object -Unique |
+                    Join-String -Separator ", "
+
+                # Since thumbprint is the same for all in this group, we only need the cert information from the first object
+                $first = $group.Group | Select-Object -First 1
+
+                [PSCustomObject]@{
+                    Uri = $first.Uri
+                    Perspectives = $perspectives
+                    Subject = $first.Subject
+                    Issuer = $first.Issuer
+                    DaysRemaining = $first.DaysRemaining()
+                    NotAfter = $first.NotAfter
+                    # LocallyTrusted is not included here as it may be different between checkers depending on
+                    # local trusted CA configuration
+                    # LocallyTrusted = $first.LocallyTrusted
+                }
+            } |
             Sort-Object -Property NotAfter
         Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Endpoints expiring soon" -Description "All endpoints expiring within 90 days (Locally trusted or not)"
 
