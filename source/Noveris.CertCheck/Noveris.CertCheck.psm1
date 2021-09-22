@@ -71,7 +71,7 @@ Class CertificateInfo
             switch ($this.$prop.GetType().FullName)
             {
                 "System.DateTime" {
-                    $table[$prop] = $this.$prop.ToString("o")
+                    $table[$prop] = $this.$prop.ToUniversalTime().ToString("o")
                     break
                 }
 
@@ -120,7 +120,7 @@ Class CertificateInfo
             }
 
             "System.DateTime" {
-                $this.$prop = [DateTime]::Parse($val)
+                $this.$prop = [DateTime]::Parse($val).ToUniversalTime()
                 break
             }
 
@@ -132,22 +132,22 @@ Class CertificateInfo
 
     [int] DaysRemaining()
     {
-        return [Math]::Round(($this.NotAfter - [DateTime]::Now).TotalDays, 2)
+        return [Math]::Round(($this.NotAfter - [DateTime]::UtcNow).TotalDays, 2)
     }
 
     [int] DaysSinceLastAttempt()
     {
-        return [Math]::Round(($this.LastAttempt - [DateTime]::Now).TotalDays, 2)
+        return [Math]::Round(($this.LastAttempt - [DateTime]::UtcNow).TotalDays, 2)
     }
 
     [int] DaysSinceLastConnect()
     {
-        return [Math]::Round(($this.LastConnect - [DateTime]::Now).TotalDays, 2)
+        return [Math]::Round(($this.LastConnect - [DateTime]::UtcNow).TotalDays, 2)
     }
 
     [bool] IsDateValid()
     {
-        if ([DateTime]::Now -lt $this.NotBefore -or [DateTime]::Now -gt $this.NotAfter)
+        if ([DateTime]::UtcNow -lt $this.NotBefore.ToUniversalTime() -or [DateTime]::UtcNow -gt $this.NotAfter.ToUniversalTime())
         {
             return $false
         }
@@ -199,7 +199,7 @@ Function Get-EndpointCertificate
     begin
     {
         # We'll verbose report on the total run time later on
-        $beginTime = [DateTime]::Now
+        $beginTime = [DateTime]::UtcNow
 
         # Create runspace environment
         Write-Verbose "Creating runspace pool"
@@ -407,7 +407,7 @@ Function Get-EndpointCertificate
             # Build status object
             $status = @{
                 Uri = $Uri
-                LastAttempt = [DateTime]::Now
+                LastAttempt = [DateTime]::UtcNow
                 Connected = $false
             }
 
@@ -480,11 +480,11 @@ Function Get-EndpointCertificate
                 # Update the hashtable with the entries we want to update on the CertificateInfo object
                 Write-Verbose ("{0}: Updating object" -f $Uri)
                 $status["Connected"] = $true
-                $status["LastConnect"] = [DateTime]::Now
+                $status["LastConnect"] = [DateTime]::UtcNow
                 $status["Subject"] = $cert.Subject
                 $status["Issuer"] = $cert.Issuer
-                $status["NotBefore"] = $cert.NotBefore
-                $status["NotAfter"] = $cert.NotAfter
+                $status["NotBefore"] = $cert.NotBefore.ToUniversalTime()
+                $status["NotAfter"] = $cert.NotAfter.ToUniversalTime()
                 $status["Thumbprint"] = $cert.Thumbprint
                 $status["LocallyTrusted"] = !$failedAuth
                 $status["Extensions"] = $extensionStr
@@ -496,7 +496,7 @@ Function Get-EndpointCertificate
             } catch {
                 Write-Warning ("{0}: Failed to check endpoint: {1}" -f $Uri, $_)
                 $status["LastErrorMsg"] = [string]$_
-                $status["LastError"] = [DateTime]::Now
+                $status["LastError"] = [DateTime]::UtcNow
             }
 
             # Return the state object
@@ -533,7 +533,7 @@ Function Get-EndpointCertificate
         $pool.Close()
         $pool.Dispose()
 
-        Write-Verbose ("Total runtime: {0} seconds" -f ([DateTime]::Now - $beginTime).TotalSeconds)
+        Write-Verbose ("Total runtime: {0} seconds" -f ([DateTime]::UtcNow - $beginTime).TotalSeconds)
     }
 }
 
@@ -633,7 +633,7 @@ Function Format-EndpointCertificateReport
         }
 
         # Display endpoints that couldn't be contacted
-        $results = $info | Where-Object {$_.Connected -eq $false -or $_.LastConnect -lt ([DateTime]::Now.AddDays(-$AgeThresholdDays))} |
+        $results = $info | Where-Object {$_.Connected -eq $false -or $_.LastConnect -lt ([DateTime]::UtcNow.AddDays(-$AgeThresholdDays))} |
             Select-Object -Property Uri,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError,LastErrorMsg
         Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Inaccessible endpoints" -Description "Endpoints not connected within last $AgeThresholdDays days or failed connection"
 
@@ -664,7 +664,7 @@ Function Format-EndpointCertificateReport
             }
         Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Invalid certificates" -Description "Endpoints with an invalid certificate (untrusted or date out of range)"
 
-        $results = $connected | Where-Object {$_.NotAfter -lt ([DateTime]::Now.AddDays(90))} |
+        $results = $connected | Where-Object {$_.NotAfter -lt ([DateTime]::UtcNow.AddDays(90))} |
             Group-Object -Property Uri,Thumbprint | ForEach-Object {
                 $group = $_
 
