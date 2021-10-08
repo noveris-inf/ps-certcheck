@@ -814,3 +814,257 @@ Function Update-EndpointsInAzureTableStorage
         Add-AzTableRow -Table $table -PartitionKey $partitionKey -RowKey $rowKey -Property $status -UpdateExisting | Out-Null
     }
 }
+
+Function Add-EndpointCategoryUri
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$Table,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$CategoryName,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [Uri]$Uri
+    )
+
+    process
+    {
+        # Normalise Uri for processing
+        $Uri = New-NormalisedUri $Uri
+
+        # only lowercase for category names
+        $CategoryName = $CategoryName.ToLower()
+
+        # Generate Base64 representations
+        $rowKey = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Uri))
+        $partitionKey = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($CategoryName))
+
+        # Data for the entry
+        $entry = @{}
+
+        # Add/Update the row
+        Write-Verbose "Updating Partition($partitionKey) RowKey($rowKey)"
+        Write-Verbose "Properties: "
+        Write-Verbose ([PSCustomObject]$entry | ConvertTo-Json)
+        Add-AzTableRow -Table $table -PartitionKey $partitionKey -RowKey $rowKey -Property $entry -UpdateExisting | Out-Null
+    }
+}
+
+Function Get-EndpointCategoryUri
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$Table,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNullOrEmpty()]
+        [string]$CategoryName,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNullOrEmpty()]
+        [Uri]$Uri
+    )
+
+    process
+    {
+        # Base for parameters for the request
+        $getParams = @{
+            Table = $Table
+        }
+
+        # Set the partition key to the category name, if supplied
+        if ($PSBoundParameters.Keys -contains "CategoryName")
+        {
+            # only lowercase for category names
+            $CategoryName = $CategoryName.ToLower()
+
+            $getParams["PartitionKey"] = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($CategoryName))
+        }
+
+        # Set the row key to the Uri, if supplied
+        if ($PSBoundParameters.Keys -contains "Uri")
+        {
+            # Normalise Uri for processing
+            $Uri = New-NormalisedUri $Uri
+            $getParams["RowKey"] = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Uri))
+        }
+
+        # Retrieve the rows and convert to native category name and uri
+        Get-AzTableRow @getParams | ForEach-Object {
+            try {
+                [PSCustomObject]@{
+                    CategoryName = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($_.PartitionKey))
+                    Uri = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($_.RowKey))
+                }
+            } catch {
+                Write-Warning "Error retrieving/converting document: $_"
+            }
+        }
+    }
+}
+
+Function Remove-EndpointCategoryUri
+{
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$Table,
+
+        [Parameter(Mandatory=$true,ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [string]$CategoryName,
+
+        [Parameter(Mandatory=$true,ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [Uri]$Uri
+    )
+
+    process
+    {
+        # Normalise Uri for processing
+        $Uri = New-NormalisedUri $Uri
+
+        # only lowercase for category names
+        $CategoryName = $CategoryName.ToLower()
+
+        # Base for parameters for the request
+        $removeParams = @{
+            Table = $Table
+            PartitionKey = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($CategoryName))
+            RowKey = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Uri))
+        }
+
+        # Retrieve the rows and convert to native category name and uri
+        try {
+            Remove-AzTableRow @removeParams
+        } catch {
+            Write-Error "Error removing Azure Table row: $_"
+        }
+    }
+}
+
+<#
+#>
+Function Format-EndpointCategoryReport
+{
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$CategoryTable,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$EndpointTable,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$AsHTML = $false
+    )
+
+    process
+    {
+        # Get a list of the categories and Uris to process
+        $categoryMap = Get-EndpointCategoryUri -Table $CategoryTable | Group-Object -Property CategoryName -AsHashTable
+
+        # Get all endpoints from Azure storage
+        $tempEndpointMap = Get-EndpointsFromAzureTableStorage -Table $EndpointTable | Group-Object -Property Uri -AsHashTable
+
+        # Convert Uri objects to string representation
+        $endpointMap = @{}
+        $tempEndpointMap.Keys | ForEach-Object {
+            $endpointMap[$_.ToString()] = $tempEndpointMap[$_]
+        }
+
+        # Merge maps together
+        $map = @{}
+        $categoryMap.Keys | ForEach-Object {
+            $categoryName = $_
+
+            # Add an entry for this category name
+            $map[$categoryName] = @{}
+
+            # Iterate through each Uri
+            $categoryMap[$categoryName] | ForEach-Object {
+                $uri = $_.Uri
+
+                # Add an entry for this Uri for this category
+                $map[$categoryName][$uri] = @()
+
+                # Find all endpoint entries that match this uri
+                if ($endpointMap.Keys -contains $uri)
+                {
+                    $map[$categoryName][$uri] = $endpointMap[$uri]
+                }
+            }
+        }
+
+        # Html preamble
+        if ($AsHTML)
+        {
+            "<!DOCTYPE html PUBLIC `"-//W3C//DTD XHTML 1.0 Strict//EN`"  `"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd`">"
+            "<html xmlns=`"http://www.w3.org/1999/xhtml`">"
+            "<head>"
+            "<title>HTML TABLE</title>"
+            "</head><body>"
+        }
+
+        # Write a section for each category name
+        $map.Keys | ForEach-Object {
+            $categoryName = $_
+
+            # Generate content for this section
+            $content = $map[$categoryName].Keys | ForEach-Object {
+                $uri = $_
+
+                # Group by thumbprint and locallytrusted so they are easily distinguishable in the report
+                $map[$categoryName][$uri] | Group-Object -Property Thumbprint,LocallyTrusted | ForEach-Object {
+                    $group = $_.Group
+
+                    # Base status in case we have no endpoint data
+                    $status = [PSCustomObject]@{
+                        Uri = $uri
+                        Perspectives = "No Data"
+                        Subject = "No Data"
+                        Issuer = "No Data"
+                        DaysRemaining = 0
+                        LocallyTrusted = $false
+                        Thumbprint = "No Data"
+                    }
+
+                    # If we have endpoint data, add perspectives and other cert data
+                    if (($group | Measure-Object).Count -gt 0)
+                    {
+                        $first = $group | Select-Object -First 1
+
+                        $status.Perspectives = $group | ForEach-Object { $_.Perspective } | Join-String -Separator ", "
+                        $status.Subject = $first.Subject
+                        $status.Issuer = $first.Issuer
+                        $status.DaysRemaining = $first.DaysRemaining()
+                        $status.LocallyTrusted = $first.LocallyTrusted
+                        $status.Thumbprint = $first.Thumbprint
+                    }
+
+                    # Pass the status on in the pipeline
+                    $status
+                }
+            }
+
+            Write-ReportSection -Content $content -AsHtml $AsHtml -Title "Category: $_" -Description "Endpoint summary for $categoryName"
+        }
+
+        if ($AsHTML)
+        {
+            "</body></html>"
+        }
+    }
+}
