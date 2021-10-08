@@ -179,6 +179,29 @@ Class CertificateInfo
 
 <#
 #>
+Function New-CertificateInfo
+{
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$false,ValueFromPipeline)]
+        [ValidateNotNull()]
+        $Obj
+    )
+
+    process
+    {
+        if ($PSBoundParameters.Keys -contains "Obj")
+        {
+            [CertificateInfo]::New($Obj)
+        } else {
+            [CertificateInfo]::New()
+        }
+    }
+}
+
+<#
+#>
 Function Get-EndpointCertificate
 {
     [CmdletBinding()]
