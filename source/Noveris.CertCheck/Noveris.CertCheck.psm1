@@ -1010,23 +1010,26 @@ Function Format-EndpointCategoryReport
 
         # Merge maps together
         $map = @{}
-        $categoryMap.Keys | ForEach-Object {
-            $categoryName = $_
+        if ($null -ne $categoryMap)
+        {
+            $categoryMap.Keys | ForEach-Object {
+                $categoryName = $_
 
-            # Add an entry for this category name
-            $map[$categoryName] = @{}
+                # Add an entry for this category name
+                $map[$categoryName] = @{}
 
-            # Iterate through each Uri
-            $categoryMap[$categoryName] | ForEach-Object {
-                $uri = $_.Uri
+                # Iterate through each Uri
+                $categoryMap[$categoryName] | ForEach-Object {
+                    $uri = $_.Uri
 
-                # Add an entry for this Uri for this category
-                $map[$categoryName][$uri] = @()
+                    # Add an entry for this Uri for this category
+                    $map[$categoryName][$uri] = @()
 
-                # Find all endpoint entries that match this uri
-                if ($endpointMap.Keys -contains $uri)
-                {
-                    $map[$categoryName][$uri] = $endpointMap[$uri]
+                    # Find all endpoint entries that match this uri
+                    if ($endpointMap.Keys -contains $uri)
+                    {
+                        $map[$categoryName][$uri] = $endpointMap[$uri]
+                    }
                 }
             }
         }
