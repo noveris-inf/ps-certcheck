@@ -594,7 +594,11 @@ Function Write-ReportSection
             ("<i>{0}</i><br><p>" -f $Description)
             if ($null -ne $Content -and ($Content | Measure-Object).Count -gt 0)
             {
-                $Content | ConvertTo-Html -As Table -Fragment
+                $Content | ConvertTo-Html -As Table -Fragment |
+                    Out-String |
+                    ForEach-Object {
+                    $_.Replace("[newline]", "<br/>")
+                }
             } else {
                 "No Content<br>"
             }
@@ -623,7 +627,11 @@ Function Format-EndpointCertificateReport
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNull()]
-        [int]$AgeThresholdDays = 5,
+        [int]$InactiveThreshold = 180,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [int]$DisconnectThreshold = 3,
 
         [Parameter(Mandatory=$false)]
         [switch]$AsHTML = $false
@@ -644,79 +652,74 @@ Function Format-EndpointCertificateReport
 
     end
     {
-        $AgeThresholdDays = [Math]::Abs($AgeThresholdDays)
+        # Ensure positive values
+        $DisconnectThreshold = [Math]::Abs($DisconnectThreshold)
+        $InactiveThreshold = [Math]::Abs($InactiveThreshold)
 
-        if ($AsHTML)
-        {
-            "<!DOCTYPE html PUBLIC `"-//W3C//DTD XHTML 1.0 Strict//EN`"  `"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd`">"
-            "<html xmlns=`"http://www.w3.org/1999/xhtml`">"
-            "<head>"
-            "<title>HTML TABLE</title>"
-            "</head><body>"
+        $content = & {
+            # Display endpoints that couldn't be contacted
+            $results = $info | Where-Object {
+                    $_.LastConnect -lt ([DateTime]::UtcNow.AddDays(-$DisconnectThreshold)) -and $_.LastConnect -ge ([DateTime]::UtcNow.AddDays(-$InactiveThreshold))
+                } |
+                Select-Object -Property Uri,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError,LastErrorMsg
+            Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Inaccessible endpoints" -Description "Endpoints not connected within last $DisconnectThreshold days"
+
+            # get all endpoint data where the endpoint could be queried
+            $connected = $info | Where-Object {$_.LastConnect -ge ([DateTime]::UtcNow.AddDays(-$DisconnectThreshold))}
+
+            $results = $connected | Where-Object {$_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false} |
+                Group-Object -Property Uri,Thumbprint | ForEach-Object {
+                    $group = $_
+
+                    # Determine all perspectives
+                    $perspectives = $group.Group | ForEach-Object { $_.Perspective } | Select-Object -Unique |
+                        Join-String -Separator ", "
+
+                    # Since thumbprint is the same for all in this group, we only need the cert information from the first object
+                    $first = $group.Group | Select-Object -First 1
+
+                    [PSCustomObject]@{
+                        Uri = $first.Uri
+                        Perspectives = $perspectives
+                        Subject = $first.Subject
+                        Issuer = $first.Issuer
+                        DaysRemaining = $first.DaysRemaining()
+                        # Locally Trusted is perspective based, so not guaranteed to be the same between separate checkers,
+                        # however this if filtered by 'LocallyTrusted -eq $false' above, so they should all be the same
+                        LocallyTrusted = $first.LocallyTrusted
+                    }
+                }
+            Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Invalid certificates" -Description "Endpoints with an invalid certificate (untrusted or date out of range)"
+
+            $results = $connected | Where-Object {$_.NotAfter -lt ([DateTime]::UtcNow.AddDays(90))} |
+                Group-Object -Property Uri,Thumbprint | ForEach-Object {
+                    $group = $_
+
+                    # Determine all perspectives
+                    $perspectives = $group.Group | ForEach-Object { $_.Perspective } | Select-Object -Unique |
+                        Join-String -Separator ", "
+
+                    # Since thumbprint is the same for all in this group, we only need the cert information from the first object
+                    $first = $group.Group | Select-Object -First 1
+
+                    [PSCustomObject]@{
+                        Uri = $first.Uri
+                        Perspectives = $perspectives
+                        Subject = $first.Subject
+                        Issuer = $first.Issuer
+                        DaysRemaining = $first.DaysRemaining()
+                        NotAfter = $first.NotAfter
+                        # LocallyTrusted is not included here as it may be different between checkers depending on
+                        # local trusted CA configuration
+                        # LocallyTrusted = $first.LocallyTrusted
+                    }
+                } |
+                Sort-Object -Property NotAfter
+            Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Endpoints expiring soon" -Description "All endpoints expiring within 90 days (Locally trusted or not)"
         }
 
-        # Display endpoints that couldn't be contacted
-        $results = $info | Where-Object {$_.Connected -eq $false -or $_.LastConnect -lt ([DateTime]::UtcNow.AddDays(-$AgeThresholdDays))} |
-            Select-Object -Property Uri,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError,LastErrorMsg
-        Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Inaccessible endpoints" -Description "Endpoints not connected within last $AgeThresholdDays days or failed connection"
-
-        # get all endpoint data where the endpoint could be queried
-        $connected = $info | Where-Object {$_.Connected}
-
-        $results = $connected | Where-Object {$_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false} |
-            Group-Object -Property Uri,Thumbprint | ForEach-Object {
-                $group = $_
-
-                # Determine all perspectives
-                $perspectives = $group.Group | ForEach-Object { $_.Perspective } | Select-Object -Unique |
-                    Join-String -Separator ", "
-
-                # Since thumbprint is the same for all in this group, we only need the cert information from the first object
-                $first = $group.Group | Select-Object -First 1
-
-                [PSCustomObject]@{
-                    Uri = $first.Uri
-                    Perspectives = $perspectives
-                    Subject = $first.Subject
-                    Issuer = $first.Issuer
-                    DaysRemaining = $first.DaysRemaining()
-                    # Locally Trusted is perspective based, so not guaranteed to be the same between separate checkers,
-                    # however this if filtered by 'LocallyTrusted -eq $false' above, so they should all be the same
-                    LocallyTrusted = $first.LocallyTrusted
-                }
-            }
-        Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Invalid certificates" -Description "Endpoints with an invalid certificate (untrusted or date out of range)"
-
-        $results = $connected | Where-Object {$_.NotAfter -lt ([DateTime]::UtcNow.AddDays(90))} |
-            Group-Object -Property Uri,Thumbprint | ForEach-Object {
-                $group = $_
-
-                # Determine all perspectives
-                $perspectives = $group.Group | ForEach-Object { $_.Perspective } | Select-Object -Unique |
-                    Join-String -Separator ", "
-
-                # Since thumbprint is the same for all in this group, we only need the cert information from the first object
-                $first = $group.Group | Select-Object -First 1
-
-                [PSCustomObject]@{
-                    Uri = $first.Uri
-                    Perspectives = $perspectives
-                    Subject = $first.Subject
-                    Issuer = $first.Issuer
-                    DaysRemaining = $first.DaysRemaining()
-                    NotAfter = $first.NotAfter
-                    # LocallyTrusted is not included here as it may be different between checkers depending on
-                    # local trusted CA configuration
-                    # LocallyTrusted = $first.LocallyTrusted
-                }
-            } |
-            Sort-Object -Property NotAfter
-        Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Endpoints expiring soon" -Description "All endpoints expiring within 90 days (Locally trusted or not)"
-
-        if ($AsHTML)
-        {
-            "</body></html>"
-        }
+        # Write out content for report
+        $content | Format-ReportContent -AsHtml $AsHtml -Title "Endpoint Report"
     }
 }
 
@@ -991,16 +994,33 @@ Function Format-EndpointCategoryReport
         [Microsoft.Azure.Cosmos.Table.CloudTable]$EndpointTable,
 
         [Parameter(Mandatory=$false)]
-        [switch]$AsHTML = $false
+        [switch]$AsHTML = $false,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [int]$InactiveThreshold = 180
     )
 
     process
     {
+        # Ensure positive values
+        $InactiveThreshold = [Math]::Abs($InactiveThreshold)
+
+        # Determine appropriate newlint per format type
+        $newline = [Environment]::Newline
+        if ($AsHtml)
+        {
+            $newline = "[newline]"
+        }
+
         # Get a list of the categories and Uris to process
         $categoryMap = Get-EndpointCategoryUri -Table $CategoryTable | Group-Object -Property CategoryName -AsHashTable
 
         # Get all endpoints from Azure storage
-        $tempEndpointMap = Get-EndpointsFromAzureTableStorage -Table $EndpointTable | Group-Object -Property Uri -AsHashTable
+        # Ignore endpoints that haven't connected within last x days
+        $tempEndpointMap = Get-EndpointsFromAzureTableStorage -Table $EndpointTable |
+            Where-Object {$_.LastConnect -gt ([DateTime]::UtcNow.AddDays(-$InactiveThreshold))} |
+            Group-Object -Property Uri -AsHashTable
 
         # Convert Uri objects to string representation
         $endpointMap = @{}
@@ -1034,18 +1054,8 @@ Function Format-EndpointCategoryReport
             }
         }
 
-        # Html preamble
-        if ($AsHTML)
-        {
-            "<!DOCTYPE html PUBLIC `"-//W3C//DTD XHTML 1.0 Strict//EN`"  `"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd`">"
-            "<html xmlns=`"http://www.w3.org/1999/xhtml`">"
-            "<head>"
-            "<title>HTML TABLE</title>"
-            "</head><body>"
-        }
-
         # Write a section for each category name
-        $map.Keys | ForEach-Object {
+        $content = $map.Keys | ForEach-Object {
             $categoryName = $_
 
             # Generate content for this section
@@ -1053,41 +1063,132 @@ Function Format-EndpointCategoryReport
                 $uri = $_
 
                 # Group by thumbprint and locallytrusted so they are easily distinguishable in the report
-                $map[$categoryName][$uri] | Group-Object -Property Thumbprint,LocallyTrusted | ForEach-Object {
-                    $group = $_.Group
+                $groups = $map[$categoryName][$uri] | Group-Object -Property Thumbprint,LocallyTrusted
 
-                    # Base status in case we have no endpoint data
+                if (($groups | Measure-Object).Count -gt 0)
+                {
+                    $groups | ForEach-Object {
+                        $group = $_.Group
+
+                        # Base status in case we have no endpoint data
+                        $status = [PSCustomObject]@{
+                            Uri = $uri
+                            Issues = ""
+                            Perspectives = "No Data"
+                            DaysRemaining = 0
+                            LocallyTrusted = $false
+                            Info = "No Data"
+                        }
+
+                        # If we have endpoint data, add perspectives and other cert data
+                        if (($group | Measure-Object).Count -gt 0)
+                        {
+                            $first = $group | Select-Object -First 1
+
+                            # Add subject info
+                            $info = "Subject: " + $first.Subject + $newline
+
+                            # Add Issuer info
+                            $info += "Issuer: " + $first.Issuer + $newline
+
+                            # Add thumbprint info
+                            $info += "Thumbprint: " + $first.Thumbprint + $newline
+
+                            $status.Perspectives = $group | ForEach-Object { $_.Perspective } | Join-String -Separator ", "
+                            $status.DaysRemaining = $first.DaysRemaining()
+                            $status.LocallyTrusted = $first.LocallyTrusted
+                            $status.Info = $info
+
+                            if (!$first.LocallyTrusted -or $first.DaysRemaining() -lt 0)
+                            {
+                                $status.Issues = "INVALID"
+                            } elseif ($first.DaysRemaining() -lt 14)
+                            {
+                                $status.Issues = "AT RISK"
+                            }
+                        }
+
+                        # Pass the status on in the pipeline
+                        $status
+                    }
+                } else {
                     $status = [PSCustomObject]@{
                         Uri = $uri
+                        Issues = "NO INFO"
                         Perspectives = "No Data"
-                        Subject = "No Data"
-                        Issuer = "No Data"
                         DaysRemaining = 0
                         LocallyTrusted = $false
-                        Thumbprint = "No Data"
+                        Info = "No Data"
                     }
-
-                    # If we have endpoint data, add perspectives and other cert data
-                    if (($group | Measure-Object).Count -gt 0)
-                    {
-                        $first = $group | Select-Object -First 1
-
-                        $status.Perspectives = $group | ForEach-Object { $_.Perspective } | Join-String -Separator ", "
-                        $status.Subject = $first.Subject
-                        $status.Issuer = $first.Issuer
-                        $status.DaysRemaining = $first.DaysRemaining()
-                        $status.LocallyTrusted = $first.LocallyTrusted
-                        $status.Thumbprint = $first.Thumbprint
-                    }
-
-                    # Pass the status on in the pipeline
-                    $status
                 }
             }
 
             Write-ReportSection -Content $content -AsHtml $AsHtml -Title "Category: $_" -Description "Endpoint summary for $categoryName"
         }
 
+        # Write out content for report
+        $content | Format-ReportContent -AsHtml $AsHtml -Title "Category Report"
+    }
+}
+
+<#
+#>
+Function Format-ReportContent
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [bool]$AsHtml = $false,
+
+        [Parameter(Mandatory=$true,ValueFromPipeline)]
+        [ValidateNotNull()]
+        $Obj,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Title = ""
+    )
+
+    begin
+    {
+        if ($AsHTML)
+        {
+            "<!DOCTYPE html PUBLIC `"-//W3C//DTD XHTML 1.0 Strict//EN`"  `"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd`">"
+            "<html xmlns=`"http://www.w3.org/1999/xhtml`">"
+            "<head>"
+            "<title>$Title</title>"
+            "<style>"
+            "table {"
+            "  font-family: Arial, Helvetica, sans-serif;"
+            "  border-collapse: collapse;"
+            "  width: 100%;"
+            "}"
+            "td, th {"
+            "  border: 1px solid #ddd;"
+            "  padding: 8px;"
+            "}"
+            "tr:nth-child(even){background-color: #f2f2f2;}"
+            "tr:hover {background-color: #ddd;}"
+            "th {"
+            "  padding-top: 12px;"
+            "  padding-bottom: 12px;"
+            "  text-align: left;"
+            "  background-color: #04AA6D;"
+            "  color: white;"
+            "}"
+            "</style>"
+            "</head><body>"
+        }
+    }
+
+    process
+    {
+        $Obj
+    }
+
+    end
+    {
         if ($AsHTML)
         {
             "</body></html>"
