@@ -1136,6 +1136,7 @@ Function Format-EndpointCategoryReport
 Function Format-ReportContent
 {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [Parameter(Mandatory=$false)]
         [ValidateNotNull()]
