@@ -604,12 +604,12 @@ Function Write-ReportSection
             }
             "<br>"
         } else {
-            Write-Information $Title
-            Write-Information "================"
-            Write-Information $Description
-            Write-Information ""
+            $Title
+            "================"
+            $Description
+            ""
             $Content
-            Write-Information ""
+            ""
         }
     }
 }
@@ -618,12 +618,17 @@ Function Write-ReportSection
 #>
 Function Format-EndpointCertificateReport
 {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '')]
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory=$true,ValueFromPipeline)]
+        [Parameter(Mandatory=$true)]
         [ValidateNotNull()]
-        [CertificateInfo]$CertificateInfo,
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$CategoryTable,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$EndpointTable,
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNull()]
@@ -637,38 +642,33 @@ Function Format-EndpointCertificateReport
         [switch]$AsHTML = $false
     )
 
-    begin
-    {
-        # The function will accumulate the objects in to a list to report on
-        # in 'end'
-        $info = New-Object 'System.Collections.Generic.List[CertificateInfo]'
-    }
-
     process
-    {
-        # Add the object to the list to report on once all objects have een received
-        $info.Add($CertificateInfo) | Out-Null
-    }
-
-    end
     {
         # Ensure positive values
         $DisconnectThreshold = [Math]::Abs($DisconnectThreshold)
         $InactiveThreshold = [Math]::Abs($InactiveThreshold)
 
+        # Get all endpoints from Azure storage
+        # Ignore endpoints that haven't connected within last x days
+        $endpoints = Get-EndpointsFromAzureTableStorage -Table $EndpointTable |
+            Where-Object {
+                $_.LastConnect -ge ([DateTime]::UtcNow.AddDays(-$InactiveThreshold))
+            }
+
         $content = & {
             # Display endpoints that couldn't be contacted
-            $results = $info | Where-Object {
-                    $_.LastConnect -lt ([DateTime]::UtcNow.AddDays(-$DisconnectThreshold)) -and $_.LastConnect -ge ([DateTime]::UtcNow.AddDays(-$InactiveThreshold))
-                } |
+            $results = $endpoints |
+                Where-Object { $_.LastConnect -lt ([DateTime]::UtcNow.AddDays(-$DisconnectThreshold)) } |
+                Sort-Object -Property NotAfter |
                 Select-Object -Property Uri,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError,LastErrorMsg
-            Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Inaccessible endpoints" -Description "Endpoints not connected within last $DisconnectThreshold days"
+            Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Inaccessible endpoints" -Description "Endpoints that have communicated within the last $InactiveThreshold days, but not within the last $DisconnectThreshold days"
 
             # get all endpoint data where the endpoint could be queried
-            $connected = $info | Where-Object {$_.LastConnect -ge ([DateTime]::UtcNow.AddDays(-$DisconnectThreshold))}
+            $connected = $endpoints | Where-Object {$_.LastConnect -ge ([DateTime]::UtcNow.AddDays(-$DisconnectThreshold))}
 
             $results = $connected | Where-Object {$_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false} |
-                Group-Object -Property Uri,Thumbprint | ForEach-Object {
+                Group-Object -Property Uri,Thumbprint |
+                ForEach-Object {
                     $group = $_
 
                     # Determine all perspectives
@@ -688,7 +688,7 @@ Function Format-EndpointCertificateReport
                         # however this if filtered by 'LocallyTrusted -eq $false' above, so they should all be the same
                         LocallyTrusted = $first.LocallyTrusted
                     }
-                }
+                } | Sort-Object -Property DaysRemaining
             Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Invalid certificates" -Description "Endpoints with an invalid certificate (untrusted or date out of range)"
 
             $results = $connected | Where-Object {$_.NotAfter -lt ([DateTime]::UtcNow.AddDays(90))} |
@@ -713,8 +713,7 @@ Function Format-EndpointCertificateReport
                         # local trusted CA configuration
                         # LocallyTrusted = $first.LocallyTrusted
                     }
-                } |
-                Sort-Object -Property NotAfter
+                } | Sort-Object -Property NotAfter
             Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Endpoints expiring soon" -Description "All endpoints expiring within 90 days (Locally trusted or not)"
         }
 
@@ -1055,7 +1054,7 @@ Function Format-EndpointCategoryReport
         }
 
         # Write a section for each category name
-        $content = $map.Keys | ForEach-Object {
+        $report = $map.Keys | ForEach-Object {
             $categoryName = $_
 
             # Generate content for this section
@@ -1078,6 +1077,7 @@ Function Format-EndpointCategoryReport
                             DaysRemaining = 0
                             LocallyTrusted = $false
                             Info = "No Data"
+                            SurveyAge = "No Data"
                         }
 
                         # If we have endpoint data, add perspectives and other cert data
@@ -1105,7 +1105,12 @@ Function Format-EndpointCategoryReport
                             } elseif ($first.DaysRemaining() -lt 14)
                             {
                                 $status.Issues = "AT RISK"
+                            } elseif ($first.DaysRemaining() -lt 30)
+                            {
+                                $status.Issues = "NEARING EXPIRY"
                             }
+
+                            $status.SurveyAge = (([DateTime]::UtcNow - $first.LastConnect).TotalDays.ToString("0.0") + " days")
                         }
 
                         # Pass the status on in the pipeline
@@ -1119,15 +1124,16 @@ Function Format-EndpointCategoryReport
                         DaysRemaining = 0
                         LocallyTrusted = $false
                         Info = "No Data"
+                        SurveyAge = "No Data"
                     }
                 }
-            }
+            } | Sort-Object -Property DaysRemaining
 
             Write-ReportSection -Content $content -AsHtml $AsHtml -Title "Category: $_" -Description "Endpoint summary for $categoryName"
         }
 
         # Write out content for report
-        $content | Format-ReportContent -AsHtml $AsHtml -Title "Category Report"
+        $report | Format-ReportContent -AsHtml $AsHtml -Title "Category Report"
     }
 }
 
@@ -1143,7 +1149,7 @@ Function Format-ReportContent
         [bool]$AsHtml = $false,
 
         [Parameter(Mandatory=$true,ValueFromPipeline)]
-        [ValidateNotNull()]
+        [AllowNull()]
         $Obj,
 
         [Parameter(Mandatory=$false)]
