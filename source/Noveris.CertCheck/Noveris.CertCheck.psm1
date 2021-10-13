@@ -616,6 +616,41 @@ Function Write-ReportSection
 
 <#
 #>
+Function Add-EndpointCategoryInfo
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$CategoryTable,
+
+        [Parameter(Mandatory=$true,ValueFromPipeline)]
+        [ValidateNotNull()]
+        [CertificateInfo]$Info
+    )
+
+    begin
+    {
+        # Get all category/uri pairs
+        $categoryMap = Get-EndpointCategoryUri -Table $CategoryTable |
+            Group-Object -Property Uri -AsHashTable
+    }
+
+    process
+    {
+        # Add category information to endpoints
+        $Info | Add-Member -NotePropertyName Categories -NotePropertyValue ""
+
+        $uri = $Info.Uri.ToString()
+        if ($null -ne $categoryMap -and $categoryMap.Keys -contains $uri -and ($categoryMap[$uri] | Measure-Object).Count -gt 0)
+        {
+            $Info.Categories = $categoryMap[$uri] | ForEach-Object { $_.CategoryName } | Join-String -Separator ", "
+        }
+    }
+}
+
+<#
+#>
 Function Format-EndpointCertificateReport
 {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '')]
@@ -655,12 +690,15 @@ Function Format-EndpointCertificateReport
                 $_.LastConnect -ge ([DateTime]::UtcNow.AddDays(-$InactiveThreshold))
             }
 
+        # Add category information to the endpoints
+        $endpoints | Add-EndpointCategoryInfo -CategoryTable $CategoryTable
+
         $content = & {
             # Display endpoints that couldn't be contacted
             $results = $endpoints |
                 Where-Object { $_.LastConnect -lt ([DateTime]::UtcNow.AddDays(-$DisconnectThreshold)) } |
                 Sort-Object -Property NotAfter |
-                Select-Object -Property Uri,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError,LastErrorMsg
+                Select-Object -Property Uri,Categories,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError,LastErrorMsg
             Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Inaccessible endpoints" -Description "Endpoints that have communicated within the last $InactiveThreshold days, but not within the last $DisconnectThreshold days"
 
             # get all endpoint data where the endpoint could be queried
@@ -680,6 +718,7 @@ Function Format-EndpointCertificateReport
 
                     [PSCustomObject]@{
                         Uri = $first.Uri
+                        Categories = $first.Categories
                         Perspectives = $perspectives
                         Subject = $first.Subject
                         Issuer = $first.Issuer
@@ -704,6 +743,7 @@ Function Format-EndpointCertificateReport
 
                     [PSCustomObject]@{
                         Uri = $first.Uri
+                        Categories = $first.Categories
                         Perspectives = $perspectives
                         Subject = $first.Subject
                         Issuer = $first.Issuer
@@ -1117,7 +1157,7 @@ Function Format-EndpointCategoryReport
                         $status
                     }
                 } else {
-                    $status = [PSCustomObject]@{
+                    [PSCustomObject]@{
                         Uri = $uri
                         Issues = "NO INFO"
                         Perspectives = "No Data"
