@@ -625,26 +625,36 @@ Function Add-EndpointCategoryInfo
         [Microsoft.Azure.Cosmos.Table.CloudTable]$CategoryTable,
 
         [Parameter(Mandatory=$true,ValueFromPipeline)]
-        [ValidateNotNull()]
+        [AllowNull()]
         [CertificateInfo]$Info
     )
 
     begin
     {
         # Get all category/uri pairs
+        Write-Verbose "Collecting category information from table"
         $categoryMap = Get-EndpointCategoryUri -Table $CategoryTable |
             Group-Object -Property Uri -AsHashTable
+        if ($null -eq $categoryMap -or ($categoryMap | Measure-Object).Count -eq 0)
+        {
+            Write-Warning "No category information found"
+        } else {
+            Write-Verbose ("Found {0} items in category map" -f ($categoryMap.Keys | Measure-Object).Count)
+        }
     }
 
     process
     {
-        # Add category information to endpoints
-        $Info | Add-Member -NotePropertyName Categories -NotePropertyValue ""
-
-        $uri = $Info.Uri.ToString()
-        if ($null -ne $categoryMap -and $categoryMap.Keys -contains $uri -and ($categoryMap[$uri] | Measure-Object).Count -gt 0)
+        if ($null -ne $Info)
         {
-            $Info.Categories = $categoryMap[$uri] | ForEach-Object { $_.CategoryName } | Join-String -Separator ", "
+            # Add category information to endpoints
+            $Info | Add-Member -NotePropertyName Categories -NotePropertyValue "" -Force
+
+            $uri = $Info.Uri.ToString()
+            if ($null -ne $categoryMap -and $categoryMap.Keys -contains $uri -and ($categoryMap[$uri] | Measure-Object).Count -gt 0)
+            {
+                $Info.Categories = $categoryMap[$uri] | ForEach-Object { $_.CategoryName } | Join-String -Separator ", "
+            }
         }
     }
 }
