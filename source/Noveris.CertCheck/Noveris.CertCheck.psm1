@@ -785,7 +785,7 @@ Function Format-EndpointCertificateReport
                             # LocallyTrusted = $first.LocallyTrusted
                         }
                     } | Sort-Object -Property NotAfter
-                Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Endpoints expiring soon" -Description "All endpoints expiring within 90 days (Locally trusted or not)"
+                Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Endpoints expiring soon" -Description "All endpoints expiring within 60 days (Locally trusted or not)"
             }
         }
 
