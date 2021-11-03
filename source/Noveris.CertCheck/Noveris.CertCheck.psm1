@@ -987,7 +987,7 @@ Function Format-EndpointReportSection
                 $content = $objList |
                     ConvertTo-Html -As Table -Fragment |
                     Out-String
-                
+
                 # Decode any Html tags, if required
                 if ($RecoverHtmlTags)
                 {
