@@ -12,4 +12,4 @@ $ErrorActionPreference = "Continue"
 
 Import-Module Noveris.CertCheck
 
-Get-EndpointCertificate -Endpoint $Endpoint
+Test-EndpointCertificate -Endpoint $Endpoint

@@ -202,7 +202,7 @@ Function New-CertificateInfo
 
 <#
 #>
-Function Get-EndpointCertificate
+Function Test-EndpointCertificate
 {
     [CmdletBinding()]
     param(
@@ -562,241 +562,7 @@ Function Get-EndpointCertificate
 
 <#
 #>
-Function Write-ReportSection
-{
-    [CmdletBinding()]
-    [OutputType([string], [System.Management.Automation.PSObject[]])]
-    param(
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [bool]$AsHtml,
-
-        [Parameter(Mandatory=$true)]
-        [AllowNull()]
-        [AllowEmptyCollection()]
-        [PSObject[]]$Content,
-
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
-        [string]$Title,
-
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
-        [string]$Description
-    )
-
-    process
-    {
-        # Write title and description information
-        if ($AsHtml)
-        {
-            ("<b>{0}</b><br>" -f $Title)
-            ("<i>{0}</i><br><p>" -f $Description)
-            if ($null -ne $Content -and ($Content | Measure-Object).Count -gt 0)
-            {
-                $Content | ConvertTo-Html -As Table -Fragment |
-                    Out-String |
-                    ForEach-Object {
-                    $_.Replace("[newline]", "<br/>")
-                }
-            } else {
-                "No Content<br>"
-            }
-            "<br>"
-        } else {
-            $Title
-            "================"
-            $Description
-            ""
-            $Content
-            ""
-        }
-    }
-}
-
-<#
-#>
-Function Add-EndpointCategoryInfo
-{
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
-        [Microsoft.Azure.Cosmos.Table.CloudTable]$CategoryTable,
-
-        [Parameter(Mandatory=$true,ValueFromPipeline)]
-        [AllowNull()]
-        [CertificateInfo]$Info
-    )
-
-    begin
-    {
-        # Get all category/uri pairs
-        Write-Verbose "Collecting category information from table"
-        $categoryMap = Get-EndpointCategoryUri -Table $CategoryTable |
-            Group-Object -Property Uri -AsHashTable
-        if ($null -eq $categoryMap -or ($categoryMap | Measure-Object).Count -eq 0)
-        {
-            Write-Warning "No category information found"
-        } else {
-            Write-Verbose ("Found {0} items in category map" -f ($categoryMap.Keys | Measure-Object).Count)
-        }
-    }
-
-    process
-    {
-        if ($null -ne $Info)
-        {
-            # Add category information to endpoints
-            $Info | Add-Member -NotePropertyName Categories -NotePropertyValue "" -Force
-
-            $uri = $Info.Uri.ToString()
-            if ($null -ne $categoryMap -and $categoryMap.Keys -contains $uri -and ($categoryMap[$uri] | Measure-Object).Count -gt 0)
-            {
-                $Info.Categories = $categoryMap[$uri] | ForEach-Object { $_.CategoryName } | Join-String -Separator ", "
-            }
-        }
-    }
-}
-
-<#
-#>
-Function Format-EndpointCertificateReport
-{
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '')]
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
-        [Microsoft.Azure.Cosmos.Table.CloudTable]$CategoryTable,
-
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
-        [Microsoft.Azure.Cosmos.Table.CloudTable]$EndpointTable,
-
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [int]$InactiveThreshold = 180,
-
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [int]$DisconnectThreshold = 3,
-
-        [Parameter(Mandatory=$false)]
-        [switch]$AsHTML = $false,
-
-        [Parameter(Mandatory=$false)]
-        [switch]$ShowInaccessible = $false,
-
-        [Parameter(Mandatory=$false)]
-        [switch]$ShowInvalid = $false,
-
-        [Parameter(Mandatory=$false)]
-        [switch]$ShowExpiring = $false
-    )
-
-    process
-    {
-        # Ensure positive values
-        $DisconnectThreshold = [Math]::Abs($DisconnectThreshold)
-        $InactiveThreshold = [Math]::Abs($InactiveThreshold)
-
-        # Get all endpoints from Azure storage
-        # Ignore endpoints that haven't connected within last x days
-        $endpoints = Get-EndpointsFromAzureTableStorage -Table $EndpointTable |
-            Where-Object {
-                $_.LastConnect -ge ([DateTime]::UtcNow.AddDays(-$InactiveThreshold))
-            }
-
-        # Add category information to the endpoints
-        $endpoints | Add-EndpointCategoryInfo -CategoryTable $CategoryTable
-
-        $content = & {
-            if ($ShowInaccessible)
-            {
-                # Display endpoints that couldn't be contacted
-                $results = $endpoints |
-                    Where-Object { $_.LastConnect -lt ([DateTime]::UtcNow.AddDays(-$DisconnectThreshold)) } |
-                    Sort-Object -Property NotAfter |
-                    Select-Object -Property Uri,Categories,Perspective,Subject,LastAttempt,LastConnect,Connected,LastError,LastErrorMsg
-                Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Inaccessible endpoints" -Description "Endpoints that have communicated within the last $InactiveThreshold days, but not within the last $DisconnectThreshold days"
-            }
-
-            # get all endpoint data where the endpoint could be queried
-            $connected = $endpoints | Where-Object {$_.LastConnect -ge ([DateTime]::UtcNow.AddDays(-$DisconnectThreshold))}
-
-            if ($ShowInvalid)
-            {
-                # Show endpoints with invalid certificates
-                $results = $connected | Where-Object {$_.LocallyTrusted -eq $false -or $_.IsDateValid() -eq $false} |
-                    Group-Object -Property Uri,Thumbprint |
-                    ForEach-Object {
-                        $group = $_
-
-                        # Determine all perspectives
-                        $perspectives = $group.Group | ForEach-Object { $_.Perspective } | Select-Object -Unique |
-                            Join-String -Separator ", "
-
-                        # Since thumbprint is the same for all in this group, we only need the cert information from the first object
-                        $first = $group.Group | Select-Object -First 1
-
-                        [PSCustomObject]@{
-                            Uri = $first.Uri
-                            Categories = $first.Categories
-                            Perspectives = $perspectives
-                            Subject = $first.Subject
-                            Issuer = $first.Issuer
-                            DaysRemaining = $first.DaysRemaining()
-                            # Locally Trusted is perspective based, so not guaranteed to be the same between separate checkers,
-                            # however this if filtered by 'LocallyTrusted -eq $false' above, so they should all be the same
-                            LocallyTrusted = $first.LocallyTrusted
-                        }
-                    } | Sort-Object -Property DaysRemaining
-                Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Invalid certificates" -Description "Endpoints with an invalid certificate (untrusted or date out of range)"
-            }
-
-            if ($ShowExpiring)
-            {
-                # Show endpoints expiring soon
-                $results = $connected | Where-Object {
-                        $_.NotAfter -lt ([DateTime]::UtcNow.AddDays(60)) -and $_.NotAfter -gt ([DateTime]::UtcNow.AddDays(-14))
-                    } |
-                    Group-Object -Property Uri,Thumbprint | ForEach-Object {
-                        $group = $_
-
-                        # Determine all perspectives
-                        $perspectives = $group.Group | ForEach-Object { $_.Perspective } | Select-Object -Unique |
-                            Join-String -Separator ", "
-
-                        # Since thumbprint is the same for all in this group, we only need the cert information from the first object
-                        $first = $group.Group | Select-Object -First 1
-
-                        [PSCustomObject]@{
-                            Uri = $first.Uri
-                            Categories = $first.Categories
-                            Perspectives = $perspectives
-                            Subject = $first.Subject
-                            Issuer = $first.Issuer
-                            DaysRemaining = $first.DaysRemaining()
-                            NotAfter = $first.NotAfter
-                            # LocallyTrusted is not included here as it may be different between checkers depending on
-                            # local trusted CA configuration
-                            # LocallyTrusted = $first.LocallyTrusted
-                        }
-                    } | Sort-Object -Property NotAfter
-                Write-ReportSection -Content $results -AsHtml $AsHtml -Title "Endpoints expiring soon" -Description "All endpoints expiring within 60 days (Locally trusted or not)"
-            }
-        }
-
-        # Write out content for report
-        $content | Format-ReportContent -AsHtml $AsHtml -Title "Endpoint Report"
-    }
-}
-
-<#
-#>
-Function Get-EndpointsFromAzureTableStorage
+Function Get-EndpointCertificate
 {
     [CmdletBinding()]
     param(
@@ -854,7 +620,7 @@ Function Get-EndpointsFromAzureTableStorage
 
 <#
 #>
-Function Update-EndpointsInAzureTableStorage
+Function Add-EndpointCertificate
 {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
@@ -912,7 +678,55 @@ Function Update-EndpointsInAzureTableStorage
     }
 }
 
-Function Add-EndpointCategoryUri
+
+<#
+#>
+Function Merge-EndpointCategory
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [Microsoft.Azure.Cosmos.Table.CloudTable]$CategoryTable,
+
+        [Parameter(Mandatory=$true,ValueFromPipeline)]
+        [AllowNull()]
+        [CertificateInfo]$Info
+    )
+
+    begin
+    {
+        # Get all category/uri pairs
+        Write-Verbose "Collecting category information from table"
+        $categoryMap = Get-CategoryUri -Table $CategoryTable |
+            Group-Object -Property Uri -AsHashTable
+        if ($null -eq $categoryMap -or ($categoryMap | Measure-Object).Count -eq 0)
+        {
+            Write-Warning "No category information found"
+        } else {
+            Write-Verbose ("Found {0} items in category map" -f ($categoryMap.Keys | Measure-Object).Count)
+        }
+    }
+
+    process
+    {
+        if ($null -ne $Info)
+        {
+            # Add category information to endpoints
+            $Info | Add-Member -NotePropertyName Categories -NotePropertyValue "" -Force
+
+            $uri = $Info.Uri.ToString()
+            if ($null -ne $categoryMap -and $categoryMap.Keys -contains $uri -and ($categoryMap[$uri] | Measure-Object).Count -gt 0)
+            {
+                $Info.Categories = $categoryMap[$uri] | ForEach-Object { $_.CategoryName } | Join-String -Separator ", "
+            }
+        }
+    }
+}
+
+<#
+#>
+Function Add-CategoryUri
 {
     [CmdletBinding()]
     param(
@@ -952,7 +766,7 @@ Function Add-EndpointCategoryUri
     }
 }
 
-Function Get-EndpointCategoryUri
+Function Get-CategoryUri
 {
     [CmdletBinding()]
     param(
@@ -1007,7 +821,7 @@ Function Get-EndpointCategoryUri
     }
 }
 
-Function Remove-EndpointCategoryUri
+Function Remove-CategoryUri
 {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
@@ -1051,167 +865,7 @@ Function Remove-EndpointCategoryUri
 
 <#
 #>
-Function Format-EndpointCategoryReport
-{
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
-        [Microsoft.Azure.Cosmos.Table.CloudTable]$CategoryTable,
-
-        [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
-        [Microsoft.Azure.Cosmos.Table.CloudTable]$EndpointTable,
-
-        [Parameter(Mandatory=$false)]
-        [switch]$AsHTML = $false,
-
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [int]$InactiveThreshold = 180
-    )
-
-    process
-    {
-        # Ensure positive values
-        $InactiveThreshold = [Math]::Abs($InactiveThreshold)
-
-        # Determine appropriate newlint per format type
-        $newline = [Environment]::Newline
-        if ($AsHtml)
-        {
-            $newline = "[newline]"
-        }
-
-        # Get a list of the categories and Uris to process
-        $categoryMap = Get-EndpointCategoryUri -Table $CategoryTable | Group-Object -Property CategoryName -AsHashTable
-
-        # Get all endpoints from Azure storage
-        # Ignore endpoints that haven't connected within last x days
-        $tempEndpointMap = Get-EndpointsFromAzureTableStorage -Table $EndpointTable |
-            Where-Object {$_.LastConnect -gt ([DateTime]::UtcNow.AddDays(-$InactiveThreshold))} |
-            Group-Object -Property Uri -AsHashTable
-
-        # Convert Uri objects to string representation
-        $endpointMap = @{}
-        $tempEndpointMap.Keys | ForEach-Object {
-            $endpointMap[$_.ToString()] = $tempEndpointMap[$_]
-        }
-
-        # Merge maps together
-        $map = @{}
-        if ($null -ne $categoryMap)
-        {
-            $categoryMap.Keys | ForEach-Object {
-                $categoryName = $_
-
-                # Add an entry for this category name
-                $map[$categoryName] = @{}
-
-                # Iterate through each Uri
-                $categoryMap[$categoryName] | ForEach-Object {
-                    $uri = $_.Uri
-
-                    # Add an entry for this Uri for this category
-                    $map[$categoryName][$uri] = @()
-
-                    # Find all endpoint entries that match this uri
-                    if ($endpointMap.Keys -contains $uri)
-                    {
-                        $map[$categoryName][$uri] = $endpointMap[$uri]
-                    }
-                }
-            }
-        }
-
-        # Write a section for each category name
-        $report = $map.Keys | ForEach-Object {
-            $categoryName = $_
-
-            # Generate content for this section
-            $content = $map[$categoryName].Keys | ForEach-Object {
-                $uri = $_
-
-                # Group by thumbprint and locallytrusted so they are easily distinguishable in the report
-                $groups = $map[$categoryName][$uri] | Group-Object -Property Thumbprint,LocallyTrusted
-
-                if (($groups | Measure-Object).Count -gt 0)
-                {
-                    $groups | ForEach-Object {
-                        $group = $_.Group
-
-                        # Base status in case we have no endpoint data
-                        $status = [PSCustomObject]@{
-                            Uri = $uri
-                            Issues = ""
-                            Perspectives = "No Data"
-                            DaysRemaining = 0
-                            LocallyTrusted = $false
-                            Info = "No Data"
-                            SurveyAge = "No Data"
-                        }
-
-                        # If we have endpoint data, add perspectives and other cert data
-                        if (($group | Measure-Object).Count -gt 0)
-                        {
-                            $first = $group | Select-Object -First 1
-
-                            # Add subject info
-                            $info = "Subject: " + $first.Subject + $newline
-
-                            # Add Issuer info
-                            $info += "Issuer: " + $first.Issuer + $newline
-
-                            # Add thumbprint info
-                            $info += "Thumbprint: " + $first.Thumbprint + $newline
-
-                            $status.Perspectives = $group | ForEach-Object { $_.Perspective } | Join-String -Separator ", "
-                            $status.DaysRemaining = $first.DaysRemaining()
-                            $status.LocallyTrusted = $first.LocallyTrusted
-                            $status.Info = $info
-
-                            if (!$first.LocallyTrusted -or $first.DaysRemaining() -lt 0)
-                            {
-                                $status.Issues = "INVALID"
-                            } elseif ($first.DaysRemaining() -lt 14)
-                            {
-                                $status.Issues = "AT RISK"
-                            } elseif ($first.DaysRemaining() -lt 30)
-                            {
-                                $status.Issues = "NEARING EXPIRY"
-                            }
-
-                            $status.SurveyAge = (([DateTime]::UtcNow - $first.LastConnect).TotalDays.ToString("0.0") + " days")
-                        }
-
-                        # Pass the status on in the pipeline
-                        $status
-                    }
-                } else {
-                    [PSCustomObject]@{
-                        Uri = $uri
-                        Issues = "NO INFO"
-                        Perspectives = "No Data"
-                        DaysRemaining = 0
-                        LocallyTrusted = $false
-                        Info = "No Data"
-                        SurveyAge = "No Data"
-                    }
-                }
-            } | Sort-Object -Property DaysRemaining
-
-            Write-ReportSection -Content $content -AsHtml $AsHtml -Title "Category: $_" -Description "Endpoint summary for $categoryName"
-        }
-
-        # Write out content for report
-        $report | Format-ReportContent -AsHtml $AsHtml -Title "Category Report"
-    }
-}
-
-<#
-#>
-Function Format-ReportContent
+Function Format-EndpointReport
 {
     [CmdletBinding()]
     [OutputType([string])]
@@ -1231,6 +885,8 @@ Function Format-ReportContent
 
     begin
     {
+        $objList = New-Object 'System.Collections.ArrayList'
+
         if ($AsHTML)
         {
             "<!DOCTYPE html PUBLIC `"-//W3C//DTD XHTML 1.0 Strict//EN`"  `"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd`">"
@@ -1263,14 +919,94 @@ Function Format-ReportContent
 
     process
     {
-        $Obj
+        if ($AsHtml)
+        {
+            $objList.Add($Obj) | Out-Null
+        } else {
+            $Obj
+        }
     }
 
     end
     {
         if ($AsHTML)
         {
+            $objList | Out-String
             "</body></html>"
+        }
+    }
+}
+
+<#
+#>
+Function Format-EndpointReportSection
+{
+    [CmdletBinding()]
+    [OutputType([string], [System.Management.Automation.PSObject[]])]
+    param(
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [bool]$AsHtml,
+
+        [Parameter(Mandatory=$true,ValueFromPipeline)]
+        [AllowNull()]
+        [PSObject]$Content,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [string]$Title,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [string]$Description,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [bool]$RecoverHtmlTags = $true
+    )
+
+    begin
+    {
+        $objList = New-Object 'System.Collections.ArrayList'
+    }
+
+    process
+    {
+        $objList.Add($Content) | Out-Null
+    }
+
+    end
+    {
+        # Write title and description information
+        if ($AsHtml)
+        {
+            ("<b>{0}</b><br>" -f $Title)
+            ("<i>{0}</i><br><p>" -f $Description)
+            if (($objList | Measure-Object).Count -gt 0)
+            {
+                $content = $objList |
+                    ConvertTo-Html -As Table -Fragment |
+                    Out-String
+
+                # Decode any Html tags, if required
+                if ($RecoverHtmlTags)
+                {
+                    $content = [System.Web.HttpUtility]::HtmlDecode($content)
+                }
+
+                # output the html result
+                $content
+            } else {
+                "No Content<br />"
+            }
+            "<br>"
+        } else {
+            $Title
+            "================"
+            $Description
+            ""
+            $objList | Format-Table
+            ""
         }
     }
 }
