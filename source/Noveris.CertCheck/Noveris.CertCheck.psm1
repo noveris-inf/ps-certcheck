@@ -28,7 +28,7 @@ Function New-NormalisedUri
 
     process
     {
-        $tempUri = [Uri]::New($Obj.ToString())
+        $tempUri = [Uri]::New($Obj.ToString().ToLower())
         $uri = [Uri]::New(("{0}://{1}:{2}" -f $tempUri.Scheme, $tempUri.Host, $tempUri.Port))
 
         $uri
