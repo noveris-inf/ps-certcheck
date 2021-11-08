@@ -307,6 +307,8 @@ Function Test-EndpointCertificate
             # Script to retrieve certificate extensions
             Function Get-CertificateExtension
             {
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '')]
+                [OutputType('System.String')]
                 [CmdletBinding()]
                 param(
                     [Parameter(Mandatory=$true)]
