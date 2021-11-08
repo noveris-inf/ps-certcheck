@@ -307,31 +307,32 @@ Function Test-EndpointCertificate
             # Script to retrieve certificate extensions
             Function Get-CertificateExtension
             {
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '')]
+                [OutputType('System.String')]
                 [CmdletBinding()]
                 param(
                     [Parameter(Mandatory=$true)]
                     [ValidateNotNullOrEmpty()]
-                    [string]$KeyName,
+                    [string]$Oid,
 
                     [Parameter(Mandatory=$true)]
                     [ValidateNotNull()]
-                    [HashTable]$Extensions
+                    [PSCustomObject[]]$Extensions
                 )
 
                 process
                 {
-                    $content = [string]::Empty
+                    $content = $Extensions |
+                        Where-Object { $_.Oid -eq $Oid } |
+                        Select-Object -First 1 |
+                        ForEach-Object { $_.Value }
 
-                    if ($Extensions.Keys -contains $KeyName)
+                    if ([string]::IsNullOrEmpty($content))
                     {
-                        $val = $Extensions[$KeyName]
-                        if ($null -ne $val)
-                        {
-                            $content = $val.ToString()
-                        }
+                        [string]::Empty
+                    } else {
+                        $content
                     }
-
-                    $content
                 }
             }
 
@@ -467,27 +468,25 @@ Function Test-EndpointCertificate
 
                 # Convert the extensions to friendly names with data
                 Write-Verbose ("{0}: Unpacking certificate extensions" -f $Uri)
-                $extensions = @{}
-                $cert.Extensions | ForEach-Object {
-                    # Extract name. Use Oid if no friendly name
-                    $name = $_.Oid.Value
-                    if (![string]::IsNullOrEmpty($_.Oid.FriendlyName))
+                $extensions = $cert.Extensions | ForEach-Object {
+                    $asndata = New-Object 'System.Security.Cryptography.AsnEncodedData' -ArgumentList $_.Oid, $_.RawData
+
+                    $friendlyName = [string]::Empty
+                    if (!([string]::IsNullOrEmpty($_.Oid.FriendlyName)))
                     {
-                        $name = $_.Oid.FriendlyName
+                        $friendlyName = $_.Oid.FriendlyName
                     }
 
-                    $asndata = New-Object 'System.Security.Cryptography.AsnEncodedData' -ArgumentList $_.Oid, $_.RawData
-                    $extensions[$name] = $asndata.Format($false)
+                    [PSCustomObject]@{
+                        Oid = $_.Oid.Value
+                        FriendlyName = $friendlyName
+                        Value = $asndata.Format($false)
+                    }
                 }
 
                 # Pack the extensions in to a string object
-                $extensionStr = $extensions.Keys | ForEach-Object {
-                    $val = $extensions[$_]
-                    if ([string]::IsNullOrEmpty($val))
-                    {
-                        $val = [string]::Empty
-                    }
-                    ("{0} = {1}" -f $_, $val)
+                $extensionStr = $extensions | ForEach-Object {
+                    ("{0}({1}) = {2}" -f $_.FriendlyName, $_.Oid, $_.Value)
                 } | Join-String -Separator ([Environment]::Newline)
 
                 # Get addresses for this endpoint
@@ -511,9 +510,9 @@ Function Test-EndpointCertificate
                 $status["Thumbprint"] = $cert.Thumbprint
                 $status["LocallyTrusted"] = !$failedAuth
                 $status["Extensions"] = $extensionStr
-                $status["SAN"] = Get-CertificateExtension -KeyName "X509v3 Subject Alternative Name" -Extensions $extensions
-                $status["EKU"] = Get-CertificateExtension -KeyName "X509v3 Extended Key Usage" -Extensions $extensions
-                $status["BasicConstraints"] = Get-CertificateExtension -KeyName "X509v3 Basic Constraints" -Extensions $extensions
+                $status["SAN"] = Get-CertificateExtension -Oid "2.5.29.17" -Extensions $extensions
+                $status["EKU"] = Get-CertificateExtension -Oid "2.5.29.37" -Extensions $extensions
+                $status["BasicConstraints"] = Get-CertificateExtension -Oid "2.5.29.19" -Extensions $extensions
                 $status["Addresses"] = $addresses | ForEach-Object { $_.ToString()} | Join-String -Separator ([Environment]::Newline)
                 $status["CertPath"] = $certPath
             } catch {
