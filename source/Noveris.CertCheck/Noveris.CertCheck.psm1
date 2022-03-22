@@ -666,7 +666,7 @@ Function Add-EndpointCertificate
         $status["Perspective"] = $partitionKey
 
         # Rewrite/transform uri to base64 encoding
-        $bytes = [System.Text.Encoding]::Unicode.GetBytes($uri)
+        $bytes = [System.Text.Encoding]::Unicode.GetBytes($uri.ToString())
         $rowKey = [Convert]::ToBase64String($bytes)
 
         # Add/Update the row
