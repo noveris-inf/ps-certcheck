@@ -485,9 +485,9 @@ Function Test-EndpointCertificate
                 }
 
                 # Pack the extensions in to a string object
-                $extensionStr = $extensions | ForEach-Object {
-                    ("{0}({1}) = {2}" -f $_.FriendlyName, $_.Oid, $_.Value)
-                } | Join-String -Separator ([Environment]::Newline)
+                $extensionStr = ($extensions | ForEach-Object {
+                    ("{0}({1}) = {2}{3}" -f $_.FriendlyName, $_.Oid, $_.Value, [Environment]::NewLine)
+                } | Out-String).TrimEnd([Environment]::NewLine)
 
                 # Get addresses for this endpoint
                 $addresses = [System.Net.DNS]::GetHostAddresses($Uri.Host)
@@ -495,9 +495,9 @@ Function Test-EndpointCertificate
                 # Build chain information for this certificate
                 $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::New()
                 $chain.Build($cert) | Out-Null
-                $certPath = $chain.ChainElements |
-                    ForEach-Object { $_.Certificate.Subject.ToString() } |
-                    Join-String -Separator ([Environment]::Newline)
+                $certPath = ($chain.ChainElements |
+                    ForEach-Object { $_.Certificate.Subject.ToString() + [Environment]::NewLine } |
+                    Out-String).TrimEnd([Environment]::NewLine)
 
                 # Update the hashtable with the entries we want to update on the CertificateInfo object
                 Write-Verbose ("{0}: Updating object" -f $Uri)
@@ -513,7 +513,7 @@ Function Test-EndpointCertificate
                 $status["SAN"] = Get-CertificateExtension -Oid "2.5.29.17" -Extensions $extensions
                 $status["EKU"] = Get-CertificateExtension -Oid "2.5.29.37" -Extensions $extensions
                 $status["BasicConstraints"] = Get-CertificateExtension -Oid "2.5.29.19" -Extensions $extensions
-                $status["Addresses"] = $addresses | ForEach-Object { $_.ToString()} | Join-String -Separator ([Environment]::Newline)
+                $status["Addresses"] = ($addresses | ForEach-Object { $_.ToString() + [Environment]::NewLine } | Out-String).TrimEnd([Environment]::NewLine)
                 $status["CertPath"] = $certPath
             } catch {
                 Write-Warning ("{0}: Failed to check endpoint: {1}" -f $Uri, $_)
