@@ -9,6 +9,7 @@
 
     # Supported PSEditions
     CompatiblePSEditions = @(
+        'Desktop',
         'Core'
     )
 
@@ -28,7 +29,7 @@
     Description = 'Certificate Checker'
 
     # Minimum version of the Windows PowerShell engine required by this module
-    PowerShellVersion = '6.0'
+    PowerShellVersion = '5.1'
 
     # Name of the Windows PowerShell host required by this module
     # PowerShellHostName = ''
