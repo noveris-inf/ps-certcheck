@@ -717,7 +717,8 @@ Function Merge-EndpointCategory
             $uri = $Info.Uri.ToString()
             if ($null -ne $categoryMap -and $categoryMap.Keys -contains $uri -and ($categoryMap[$uri] | Measure-Object).Count -gt 0)
             {
-                $Info.Categories = $categoryMap[$uri] | ForEach-Object { $_.CategoryName } | Join-String -Separator ", "
+                $Info.Categories = $categoryMap[$uri] | ForEach-Object { $_.CategoryName + ", " }
+                $Info.Categories = $Info.Categories.TrimEnd(", ")
             }
         }
     }
