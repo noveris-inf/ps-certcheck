@@ -10,6 +10,6 @@ Set-StrictMode -Version 2
 $InformationPreference = "Continue"
 $ErrorActionPreference = "Continue"
 
-Import-Module Noveris.CertCheck
+Import-Module CertCheck
 
 Test-EndpointCertificate -Endpoint $Endpoint

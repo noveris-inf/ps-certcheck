@@ -4,6 +4,6 @@ COPY setup.ps1 /setup.ps1
 RUN pwsh /setup.ps1
 
 COPY entrypoint.ps1 /entrypoint.ps1
-COPY Noveris.CertCheck/ /usr/local/share/powershell/Modules/Noveris.CertCheck
+COPY CertCheck/ /usr/local/share/powershell/Modules/CertCheck
 
 ENTRYPOINT [ "pwsh", "/entrypoint.ps1" ]

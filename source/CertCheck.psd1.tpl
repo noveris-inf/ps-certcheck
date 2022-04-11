@@ -1,8 +1,8 @@
-# Module manifest for Noveris.CertCheck
+# Module manifest for CertCheck
 
 @{
     # Script module or binary module file associated with this manifest.
-    RootModule = 'Noveris.CertCheck.psm1'
+    RootModule = 'CertCheck.psm1'
 
     # Version number of this module.
     ModuleVersion = '__FULLVERSION__'
@@ -14,16 +14,16 @@
     )
 
     # ID used to uniquely identify this module
-    GUID = '58c48eec-692f-4da6-bc8b-80b84a29f86c'
+    GUID = '68224fda-a519-41f4-8432-a4ea19b36de6'
 
     # Author of this module
-    Author = 'Noveris Pty Ltd'
+    Author = 'Jesse Reichman'
 
     # Company or vendor of this module
-    CompanyName = 'Noveris Pty Ltd'
+    CompanyName = 'ArchMachina'
 
     # Copyright statement for this module
-    Copyright = '(c) 2021 Noveris Pty Ltd. All rights reserved.'
+    Copyright = '(c) 2020 Jesse Reichman. All rights reserved.'
 
     # Description of the functionality provided by this module
     Description = 'Certificate Checker'
@@ -65,7 +65,7 @@
 
     # Modules to import as nested modules of the module specified in RootModule/ModuleToProcess
     NestedModules = @(
-        'Noveris.CertCheck.psm1'
+        'CertCheck.psm1'
     )
 
     # Functions to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no functions to export.
@@ -96,7 +96,7 @@
 
     # List of all modules packaged with this module
     #ModuleList = @(
-    #    'Noveris.CertCheck.psm1'
+    #    'CertCheck.psm1'
     #)
 
     # List of all files packaged with this module
@@ -114,10 +114,10 @@
             )
 
             # A URL to the license for this module.
-            LicenseUri = 'https://github.com/noveris-inf/ps-certcheck/blob/main/LICENSE'
+            LicenseUri = 'https://github.com/archmachina/ps-certcheck/blob/main/LICENSE'
 
             # A URL to the main website for this project.
-            ProjectUri = 'https://github.com/noveris-inf/ps-certcheck/'
+            ProjectUri = 'https://github.com/archmachina/ps-certcheck/'
 
             # A URL to an icon representing this module.
             # IconUri = ''
