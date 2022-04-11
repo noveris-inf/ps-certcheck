@@ -125,14 +125,13 @@ Invoke-CIProfile -Name $Profile -Steps @{
 
             # Push docker images
             Write-Information "Pushing docker tags"
-            $dockerTags | ForEach-Object {
+            $dockerTags | Select-Object -Unique | ForEach-Object {
                 $tag = $_
                 $path = ("{0}:{1}" -f $dockerImageName, $_)
 
                 # Docker tag
                 Write-Information ("Tagging build for {0}" -f $tag)
                 Invoke-Native "docker" "tag", $dockerImageName, $path
-                Assert-SuccessExitCode $LASTEXITCODE
 
                 # Docker push
                 Write-Information ("Docker push for for {0}" -f $path)
