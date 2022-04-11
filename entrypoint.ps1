@@ -121,7 +121,7 @@ Invoke-CIProfile -Name $Profile -Steps @{
 
             # Attempt login to docker registry
             Write-Information "Attempting login for docker registry"
-            Invoke-Native -Script { $Env:DOCKER_TOKEN | docker login --password-stdin -u $Env:DOCKER_USERNAME $Env:DOCKER_REGISTRY }
+            Invoke-Native -Script { $Env:DOCKER_HUB_TOKEN | docker login --password-stdin -u archmachina docker.io }
 
             # Push docker images
             Write-Information "Pushing docker tags"
