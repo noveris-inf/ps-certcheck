@@ -513,7 +513,12 @@ Function Test-EndpointCertificate
                 $status["SAN"] = Get-CertificateExtension -Oid "2.5.29.17" -Extensions $extensions
                 $status["EKU"] = Get-CertificateExtension -Oid "2.5.29.37" -Extensions $extensions
                 $status["BasicConstraints"] = Get-CertificateExtension -Oid "2.5.29.19" -Extensions $extensions
-                $status["Addresses"] = ($addresses | ForEach-Object { $_.ToString() + [Environment]::NewLine } | Out-String).TrimEnd([Environment]::NewLine)
+
+                $addressStr = ""
+                $addresses | ForEach-Object { $addressStr += ($_.ToString() + ", ") }
+                $addressStr = $addressStr.TrimEnd(", ")
+
+                $status["Addresses"] = $addressStr
                 $status["CertPath"] = $certPath
             } catch {
                 Write-Warning ("{0}: Failed to check endpoint: {1}" -f $Uri, $_)
