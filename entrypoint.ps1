@@ -47,7 +47,7 @@ $dockerImageName = "archmachina/certcheck"
 Invoke-CIProfile -Name $Profile -Steps @{
 
     lint = @{
-        Script = {
+        Steps = {
             Use-PowershellGallery
             Install-Module PSScriptAnalyzer -Scope CurrentUser
             Import-Module PSScriptAnalyzer
@@ -61,7 +61,7 @@ Invoke-CIProfile -Name $Profile -Steps @{
     }
 
     build = @{
-        Script = {
+        Steps = {
             # Template PowerShell module definition
             Write-Information "Templating CertCheck.psd1"
             Format-TemplateFile -Template source/CertCheck.psd1.tpl -Target source/CertCheck/CertCheck.psd1 -Content @{
@@ -91,16 +91,15 @@ Invoke-CIProfile -Name $Profile -Steps @{
     }
 
     pr = @{
-        Dependencies = $("build")
+        Steps = "build"
     }
 
     latest = @{
-        Dependencies = $("build")
+        Steps = "build"
     }
 
     release = @{
-        Dependencies = $("build")
-        Script = {
+        Steps = "build", {
             $owner = "archmachina"
             $repo = "ps-certcheck"
 
