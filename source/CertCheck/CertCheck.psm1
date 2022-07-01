@@ -271,7 +271,7 @@ Function Test-EndpointCertificate
             {
                 try { $conn.Connection = ([Uri]::New(($Connection["Connection"])).ToString())} catch {}
                 try { $conn.Connection = ([Uri]::New(($Connection["Uri"])).ToString())} catch {}
-                try { $conn.Sni = ([Uri]::New(($Connection["Sni"])).ToString())} catch {}
+                try { $conn.Sni = ($Connection["Sni"]).ToString()} catch {}
 
                 return
             }
@@ -281,7 +281,7 @@ Function Test-EndpointCertificate
             {
                 try { $conn.Connection = ([Uri]::New(($Connection.Connection)).ToString())} catch {}
                 try { $conn.Connection = ([Uri]::New(($Connection.Uri)).ToString())} catch {}
-                try { $conn.Sni = ([Uri]::New(($Connection.Sni)).ToString())} catch {}
+                try { $conn.Sni = ($Connection.Sni).ToString()} catch {}
 
                 return
             }

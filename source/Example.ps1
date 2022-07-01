@@ -13,6 +13,9 @@ Import-Module ./CertCheck/CertCheck.psm1
 }, @{
     Connection = "https://www.microsoft.com"
     Sni = "tester.microsoft.com"
+}, @{
+    Connection = "https://www.yahoo.com"
+    SNI = "Shouldwork"
 }, "https://www.news.com.au",
 [Uri]"https://toggl.com",
 "https://toggl.com",
