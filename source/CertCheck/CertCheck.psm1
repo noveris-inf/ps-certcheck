@@ -253,6 +253,16 @@ Function Test-EndpointCertificate
                 return
             }
 
+            # If it's a HashTable, check for relevant keys
+            if ($Connection.GetType().FullName -eq "System.Collections.Hashtable")
+            {
+                try { $conn.Connection = ([Uri]($Connection["Connection"])).ToString()} catch {}
+                try { $conn.Connection = ([Uri]($Connection["Uri"])).ToString()} catch {}
+                try { $conn.Sni = ([Uri]($Connection["Sni"])).ToString()} catch {}
+
+                return
+            }
+
             # If it's a custom object, check for members
             if ($Connection.GetType().FullName -eq "System.Management.Automation.PSCustomObject")
             {

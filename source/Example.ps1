@@ -10,7 +10,7 @@ Import-Module ./CertCheck/CertCheck.psm1
 @([PSCustomObject]@{
     Connection = "https://www.google.com.au"
     Sni = "elsewhere.local"
-}, [PSCustomObject]@{
+}, @{
     Connection = "https://www.microsoft.com"
     Sni = "tester.microsoft.com"
 }, "https://www.news.com.au", [Uri]"https://toggl.com") | Test-EndpointCertificate | Format-Table Connection, Sni, Subject
