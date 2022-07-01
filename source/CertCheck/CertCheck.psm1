@@ -358,20 +358,20 @@ Function Test-EndpointCertificate
                 Connection = $Connection
                 Sni = $Sni
                 Connected = $false
-                Subject = $null
-                Issuer = $null
-                NotBefore = $null
-                NotAfter = $null
-                Thumbprint = $null
-                LocallyTrusted = $null
-                Extensions = $null
-                SAN = $null
-                EKU = $null
-                BasicConstraints = $null
-                RawData = $null
-                Addresses = $null
-                CertPath = $null
-                ErrorMsg = $null
+                Subject = ""
+                Issuer = ""
+                NotBefore = [DateTime]::MinValue
+                NotAfter = [DateTime]::MinValue
+                Thumbprint = ""
+                LocallyTrusted = $false
+                Extensions = ""
+                SAN = ""
+                EKU = ""
+                BasicConstraints = ""
+                RawData = ""
+                Addresses = ""
+                CertPath = ""
+                ErrorMsg = ""
             }
 
             # Uri object for connection
