@@ -40,14 +40,22 @@ Function Get-CertificateExtension
         [string]$Oid,
 
         [Parameter(Mandatory=$true)]
-        [ValidateNotNull()]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [PSCustomObject[]]$Extensions
     )
 
     process
     {
+        # Handle an empty extensions list
+        if (($Extensions | Measure-Object).Count -eq 0)
+        {
+            [string]::Empty
+            return
+        }
+
         $content = $Extensions |
-            Where-Object { $_.Oid -eq $Oid } |
+            Where-Object { $null -ne $_ -and $_.Oid -eq $Oid } |
             Select-Object -First 1 |
             ForEach-Object { $_.Value }
 
@@ -350,6 +358,20 @@ Function Test-EndpointCertificate
                 Connection = $Connection
                 Sni = $Sni
                 Connected = $false
+                Subject = $null
+                Issuer = $null
+                NotBefore = $null
+                NotAfter = $null
+                Thumbprint = $null
+                LocallyTrusted = $null
+                Extensions = $null
+                SAN = $null
+                EKU = $null
+                BasicConstraints = $null
+                RawData = $null
+                Addresses = $null
+                CertPath = $null
+                ErrorMsg = $null
             }
 
             # Uri object for connection
