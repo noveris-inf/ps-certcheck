@@ -13,7 +13,10 @@ Import-Module ./CertCheck/CertCheck.psm1
 }, @{
     Connection = "https://www.microsoft.com"
     Sni = "tester.microsoft.com"
-}, "https://www.news.com.au", [Uri]"https://toggl.com") | Test-EndpointCertificate | Format-Table Connection, Sni, Subject
+}, "https://www.news.com.au",
+[Uri]"https://toggl.com",
+"https://toggl.com",
+"https://www.news.com.au") | Test-EndpointCertificate | Format-Table Connection, Sni, Subject
 
 Test-EndpointCertificate -Connection "https://www.google.com.au" | Format-Table Connection, Sni, Subject
 "https://www.google.com.au" | Test-EndpointCertificate | Format-Table Connection, Sni, Subject

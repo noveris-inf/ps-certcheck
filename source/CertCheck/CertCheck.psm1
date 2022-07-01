@@ -189,6 +189,10 @@ Function Test-EndpointCertificate
             jobs = New-Object System.Collections.Generic.LinkedList[PSObject]
         }
 
+        # Create a list of endpoints we've scheduled for checking to avoid duplicates
+        # passed in by pipeline
+        $scheduled = New-Object 'System.Collections.generic.HashSet[string]'
+
         # Common wait block to use to process finished jobs
         # $target is the is the high count before we can schedule more checks
         $waitScript = {
@@ -256,9 +260,9 @@ Function Test-EndpointCertificate
             # If it's a HashTable, check for relevant keys
             if ($Connection.GetType().FullName -eq "System.Collections.Hashtable")
             {
-                try { $conn.Connection = ([Uri]($Connection["Connection"])).ToString()} catch {}
-                try { $conn.Connection = ([Uri]($Connection["Uri"])).ToString()} catch {}
-                try { $conn.Sni = ([Uri]($Connection["Sni"])).ToString()} catch {}
+                try { $conn.Connection = ([Uri]::New(($Connection["Connection"])).ToString())} catch {}
+                try { $conn.Connection = ([Uri]::New(($Connection["Uri"])).ToString())} catch {}
+                try { $conn.Sni = ([Uri]::New(($Connection["Sni"])).ToString())} catch {}
 
                 return
             }
@@ -266,16 +270,16 @@ Function Test-EndpointCertificate
             # If it's a custom object, check for members
             if ($Connection.GetType().FullName -eq "System.Management.Automation.PSCustomObject")
             {
-                try { $conn.Connection = ([Uri]($Connection.Connection)).ToString()} catch {}
-                try { $conn.Connection = ([Uri]($Connection.Uri)).ToString()} catch {}
-                try { $conn.Sni = ([Uri]($Connection.Sni)).ToString()} catch {}
+                try { $conn.Connection = ([Uri]::New(($Connection.Connection)).ToString())} catch {}
+                try { $conn.Connection = ([Uri]::New(($Connection.Uri)).ToString())} catch {}
+                try { $conn.Sni = ([Uri]::New(($Connection.Sni)).ToString())} catch {}
 
                 return
             }
 
             # See if we can convert it to a uri object
             try {
-                $uri = [Uri]$Connection
+                $uri = [Uri]::New($Connection)
 
                 # Success - Use this object
                 $conn.Connection = $uri.ToString()
@@ -308,6 +312,16 @@ Function Test-EndpointCertificate
             Write-Warning ("Could not convert incoming object or invalid inputs: {0}" -f $Connection)
             return
         }
+
+        # Check if this combination of connection and uri is already in the scheduled list
+        # and don't check, if it is already present
+        $key = $conn.Connection + ":" + $conn.Sni
+        if ($scheduled.Contains($key))
+        {
+            return
+        }
+
+        $scheduled.Add($key) | Out-Null
 
         # Schedule a run for this uri
         Write-Verbose ("Scheduling check: {0}" -f $Connection)
