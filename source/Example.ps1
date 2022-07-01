@@ -22,3 +22,5 @@ Test-EndpointCertificate -Connection "https://www.google.com.au" | Format-Table 
 "https://www.google.com.au" | Test-EndpointCertificate | Format-Table Connection, Sni, Subject
 "https://www.google.com.au" | Test-EndpointCertificate -Sni test | Format-Table Connection, Sni, Subject
 Test-EndpointCertificate -Connection "https://www.google.com.au" -Sni test | Format-Table Connection, Sni, Subject
+
+Test-EndpointCertificate "https://www.google.com.au" -AsHashTable

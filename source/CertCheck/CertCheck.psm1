@@ -175,7 +175,10 @@ Function Test-EndpointCertificate
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNull()]
-        [Int]$TimeoutSec = 10
+        [Int]$TimeoutSec = 10,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$AsHashTable = $false
     )
 
     begin
@@ -187,6 +190,7 @@ Function Test-EndpointCertificate
         # (i.e. update the reference)
         $state = [PSCustomObject]@{
             jobs = New-Object System.Collections.Generic.LinkedList[PSObject]
+            AsHashTable = $AsHashTable
         }
 
         # Create a list of endpoints we've scheduled for checking to avoid duplicates
@@ -222,7 +226,12 @@ Function Test-EndpointCertificate
                     try {
                         $result = Receive-Job -Job $job | Select-Object -First 1
 
-                        [PSCustomObject]$result
+                        if ($state.AsHashTable)
+                        {
+                            $result
+                        } else {
+                            [PSCustomObject]$result
+                        }
                     } catch {
                         Write-Warning "Error reading return from runspace job: $_"
                         Write-Warning ($_ | Format-List -property * | Out-String)
