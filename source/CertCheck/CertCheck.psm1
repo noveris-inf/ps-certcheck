@@ -194,10 +194,20 @@ Function Test-EndpointCertificate
         # We'll verbose report on the total run time later on
         $beginTime = [DateTime]::UtcNow
 
+        # Initial session state for the check script. This is to import functions in to the
+        # creates runspaces
+        $initialSessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+
+        @("Get-CertificateData", "Get-CertificateExtension") | ForEach-Object {
+            $content = Get-Content Function:\$_ | Out-String
+            $function = [System.Management.Automation.Runspaces.SessionStateFunctionEntry]::New($_, $content)
+            $initialSessionState.Commands.Add($function)
+        }
+
         # Use a custom object so the wait block can replace the list with a new list
         # (i.e. update the reference)
         $state = [PSCustomObject]@{
-            jobs = New-Object System.Collections.Generic.LinkedList[PSObject]
+            runspaces = New-Object System.Collections.Generic.List[PSCustomObject]
             AsHashTable = $AsHashTable
         }
 
@@ -210,29 +220,29 @@ Function Test-EndpointCertificate
         $waitScript = {
             param($state, $target)
 
-            while (($state.jobs | Measure-Object).Count -gt $target)
+            while (($state.runspaces | Measure-Object).Count -gt $target)
             {
                 # Separate tasks in to 'completed' and not
-                $tempList = New-Object System.Collections.Generic.List[PSObject]
-                $completeList = New-Object System.Collections.Generic.List[PSObject]
-                $state.jobs | ForEach-Object {
-                    if ($_.State -in @("Running"))
+                $tempList = New-Object System.Collections.Generic.List[PSCustomObject]
+                $completeList = New-Object System.Collections.Generic.List[PSCustomObject]
+                $state.runspaces | ForEach-Object {
+                    if ($_.Status.IsCompleted)
                     {
-                        $tempList.Add($_)
-                    } else {
                         $completeList.Add($_)
+                    } else {
+                        $tempList.Add($_)
                     }
                 }
-                $state.jobs = $tempList
+                $state.runspaces = $tempList
 
-                # Process completed jobs
+                # Process completed runspaces
                 $completeList | ForEach-Object {
-                    $job = $_
+                    $runspace = $_
 
                     # Try to receive the job output, being the HashTable containing
                     # the properties for the check
                     try {
-                        $result = Receive-Job -Job $job | Select-Object -First 1
+                        $result = $runspace.Runspace.EndInvoke($runspace.Status) | Select-Object -First 1
 
                         if ($state.AsHashTable)
                         {
@@ -241,12 +251,13 @@ Function Test-EndpointCertificate
                             [PSCustomObject]$result
                         }
                     } catch {
-                        Write-Warning "Error reading return from runspace job: $_"
+                        Write-Warning "Error reading return from runspace: $_"
                         Write-Warning ($_ | Format-List -property * | Out-String)
                     }
 
-                    # Make sure we remove the job now
-                    Remove-Job $job -Force -EA Ignore | Out-Null
+                    # Make sure we remove the runspace now
+                    $runspace.Runspace.Dispose()
+                    $runspace.Status = $null
                 }
 
                 Start-Sleep -Seconds 1
@@ -340,18 +351,13 @@ Function Test-EndpointCertificate
 
         $scheduled.Add($key) | Out-Null
 
-        # Schedule a run for this uri
-        Write-Verbose ("Scheduling check: {0}" -f $Connection)
-        $job = Start-Job -ScriptBlock {
+        # Endpoint check script
+        $checkScript = {
             param($Connection, $Sni, $TimeoutSec)
 
             $InformationPreference = "Continue"
             $ErrorActionPreference = "Stop"
             Set-StrictMode -Version 2
-
-            # Import functions from callers scope
-            ${Function:Get-CertificateData} = ${using:Function:Get-CertificateData}
-            ${Function:Get-CertificateExtension} = ${using:Function:Get-CertificateExtension}
 
             # Build status object
             $status = @{
@@ -470,15 +476,26 @@ Function Test-EndpointCertificate
 
             # Return the state object
             $status
-        } -ArgumentList $conn.Connection, $conn.Sni, $TimeoutSec
+        }
 
-        $state.jobs.Add($job)
+        # Schedule a run for this uri
+        Write-Verbose ("Scheduling check: {0}" -f $Connection)
+        $runspace = [PowerShell]::Create($initialSessionState)
+        $runspace.AddScript($checkScript) | Out-Null
+        $runspace.AddParameter("Connection", $conn.Connection) | Out-Null
+        $runspace.AddParameter("Sni", $conn.Connection) | Out-Null
+        $runspace.AddParameter("TimeoutSec", $TimeoutSec) | Out-Null
+
+        $state.runspaces.Add([PSCustomObject]@{
+            Runspace = $runspace
+            Status = $runspace.BeginInvoke()
+        })
     }
 
     end
     {
-        # Wait for all jobs to finish
-        Write-Verbose "Waiting for remainder of jobs to finish"
+        # Wait for all runspaces to finish
+        Write-Verbose "Waiting for remainder of runspaces to finish"
         Invoke-Command -Script $waitScript -ArgumentList $state, 0
 
         Write-Verbose ("Total runtime: {0} seconds" -f ([DateTime]::UtcNow - $beginTime).TotalSeconds)

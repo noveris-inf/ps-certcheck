@@ -19,7 +19,7 @@ Import-Module ./CertCheck/CertCheck.psm1
 }, "https://www.news.com.au",
 [Uri]"https://toggl.com",
 "https://toggl.com",
-"https://www.news.com.au") | Test-EndpointCertificate | Format-Table Connection, Sni, Subject
+"https://www.news.com.au") | Test-EndpointCertificate | Format-List Connection, Sni, Subject, ErrorMsg
 
 Test-EndpointCertificate -Connection "https://www.google.com.au" | Format-Table Connection, Sni, Subject
 "https://www.google.com.au" | Test-EndpointCertificate | Format-Table Connection, Sni, Subject
@@ -27,3 +27,5 @@ Test-EndpointCertificate -Connection "https://www.google.com.au" | Format-Table 
 Test-EndpointCertificate -Connection "https://www.google.com.au" -Sni test | Format-Table Connection, Sni, Subject
 
 Test-EndpointCertificate "https://www.google.com.au" -AsHashTable
+
+@("https://www.google.com.au", "https://www.microsoft.com") | Test-EndpointCertificate -AsHashTable
