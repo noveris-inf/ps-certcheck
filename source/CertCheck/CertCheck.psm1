@@ -143,7 +143,7 @@ Function Get-CertificateData
 
             # Capture the remote certificate from the stream
             Write-Verbose ("{0}: Retrieving remote certificate" -f $Uri)
-            $status.Certificate = New-Object 'System.Security.Cryptography.X509Certificates.X509Certificate2' -ArgumentList $stream.RemoteCertificate
+            $status.Certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::New($stream.RemoteCertificate)
         } catch {
             $status.Error = $_.ToString()
         } finally {
@@ -405,7 +405,7 @@ Function Test-EndpointCertificate
                     $failedAuth = $true
                 }
 
-                if (!$connectStatus.AuthSuccess -or !$connectStatus.Connected -or $null -eq $connectStatus.Certificate)
+                if (!$connectStatus.AuthSuccess -or !$connectStatus.Connected -or $null -eq $connectStatus.Certificate -or ![string]::IsNullOrEmpty($connectStatus.Error))
                 {
                     # Issue with connecting to the endpoint here. Can't continue
                     Write-Verbose "Endpoint connectivity or auth failure"
@@ -416,26 +416,34 @@ Function Test-EndpointCertificate
 
                 # Convert the extensions to friendly names with data
                 Write-Verbose ("{0}: Unpacking certificate extensions" -f $Connection)
-                $extensions = $cert.Extensions | ForEach-Object {
-                    $asndata = New-Object 'System.Security.Cryptography.AsnEncodedData' -ArgumentList $_.Oid, $_.RawData
+                try {
+                    $extensions = $cert.Extensions | Where-Object { $null -ne $_ } | ForEach-Object {
+                        $asndata = New-Object 'System.Security.Cryptography.AsnEncodedData' -ArgumentList $_.Oid, $_.RawData
 
-                    $friendlyName = [string]::Empty
-                    if (!([string]::IsNullOrEmpty($_.Oid.FriendlyName)))
-                    {
-                        $friendlyName = $_.Oid.FriendlyName
-                    }
+                        $friendlyName = [string]::Empty
+                        if (!([string]::IsNullOrEmpty($_.Oid.FriendlyName)))
+                        {
+                            $friendlyName = $_.Oid.FriendlyName
+                        }
 
-                    [PSCustomObject]@{
-                        Oid = $_.Oid.Value
-                        FriendlyName = $friendlyName
-                        Value = $asndata.Format($false)
+                        [PSCustomObject]@{
+                            Oid = $_.Oid.Value
+                            FriendlyName = $friendlyName
+                            Value = $asndata.Format($false)
+                        }
                     }
+                } catch {
+                    Write-Error "Error unpacking extensions: $_"
                 }
 
                 # Pack the extensions in to a string object
-                $extensionStr = ($extensions | ForEach-Object {
-                    ("{0}({1}) = {2}{3}" -f $_.FriendlyName, $_.Oid, $_.Value, [Environment]::NewLine)
-                } | Out-String).TrimEnd([Environment]::NewLine)
+                try {
+                    $extensionStr = ($extensions | ForEach-Object {
+                        ("{0}({1}) = {2}{3}" -f $_.FriendlyName, $_.Oid, $_.Value, [Environment]::NewLine)
+                    } | Out-String).TrimEnd([Environment]::NewLine)
+                } catch {
+                    Write-Error "Error transforming extensions: $_"
+                }
 
                 # Get addresses for this endpoint
                 $addresses = [System.Net.DNS]::GetHostAddresses($uri.Host)
@@ -483,7 +491,7 @@ Function Test-EndpointCertificate
         $runspace = [PowerShell]::Create($initialSessionState)
         $runspace.AddScript($checkScript) | Out-Null
         $runspace.AddParameter("Connection", $conn.Connection) | Out-Null
-        $runspace.AddParameter("Sni", $conn.Connection) | Out-Null
+        $runspace.AddParameter("Sni", $conn.Sni) | Out-Null
         $runspace.AddParameter("TimeoutSec", $TimeoutSec) | Out-Null
 
         $state.runspaces.Add([PSCustomObject]@{
