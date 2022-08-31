@@ -13,19 +13,55 @@ Function New-NormalisedUri
 {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
-    [OutputType([System.Uri])]
     param(
         [Parameter(Mandatory=$true)]
         [ValidateNotNull()]
-        $Obj
+        $UriObj,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$AsString = $false
     )
 
     process
     {
-        $tempUri = [Uri](([Uri]$Obj).AbsoluteUri.ToLower())
+        # If it's not a URI, attempt to convert to Uri directly
+        $uri = $UriObj
+        if ($uri.GetType().FullName -ne "System.Uri")
+        {
+            try {
+                $uri = [Uri]::New($uri)
+            } catch {
+                Write-Verbose "Input could not be converted to Uri directly"
+            }
+        }
+
+        # If it's still not a URI, attempt to convert to Uri with a https:// prefix
+        if ($uri.GetType().FullName -ne "System.Uri")
+        {
+            try {
+                $uri = [Uri]::New("https://" + $uri)
+            } catch {
+                Write-Verbose "Input could not be converted to Uri with https scheme prefix"
+            }
+        }
+
+        # If it's still not a URI, then fail the normalisation
+        if ($uri.GetType().FullName -ne "System.Uri")
+        {
+            Write-Error "Failed to convert object to uri"
+        }
+
+        # Ensure the URI is lowercase and the path is absent
+        $tempUri = [Uri]::New($uri.AbsoluteUri.ToLower())
         $uri = [Uri]::New(("{0}://{1}:{2}" -f $tempUri.Scheme, $tempUri.Host, $tempUri.Port))
 
-        $uri
+        # Pass the Uri on
+        if ($AsString)
+        {
+            $uri.ToString()
+        } else {
+            $uri
+        }
     }
 }
 
@@ -280,17 +316,17 @@ Function Test-EndpointCertificate
             # Check if we have a Uri object
             if ($Connection.GetType().FullName -eq "System.Uri")
             {
-                $conn.Connection = $Connection.AbsoluteUri
-                $conn.Sni = $Connection.Host
+                $conn.Connection = $Connection.AbsoluteUri.ToString()
+                $conn.Sni = $Connection.Host.ToString()
                 return
             }
 
             # If it's a HashTable, check for relevant keys
             if ($Connection.GetType().FullName -eq "System.Collections.Hashtable")
             {
-                try { $conn.Connection = ([Uri]::New(($Connection["Connection"])).ToString())} catch {}
-                try { $conn.Connection = ([Uri]::New(($Connection["Uri"])).ToString())} catch {}
-                try { $conn.Sni = ($Connection["Sni"]).ToString()} catch {}
+                try { $conn.Connection = $Connection["Uri"].ToString() } catch {}
+                try { $conn.Connection = $Connection["Connection"].ToString() } catch {}
+                try { $conn.Sni = $Connection["Sni"].ToString() } catch {}
 
                 return
             }
@@ -298,30 +334,38 @@ Function Test-EndpointCertificate
             # If it's a custom object, check for members
             if ($Connection.GetType().FullName -eq "System.Management.Automation.PSCustomObject")
             {
-                try { $conn.Connection = ([Uri]::New(($Connection.Connection)).ToString())} catch {}
-                try { $conn.Connection = ([Uri]::New(($Connection.Uri)).ToString())} catch {}
-                try { $conn.Sni = ($Connection.Sni).ToString()} catch {}
+                try { $conn.Connection = $Connection.Uri.ToString() } catch {}
+                try { $conn.Connection = $Connection.Connection.ToString() } catch {}
+                try { $conn.Sni = $Connection.Sni.ToString() } catch {}
 
                 return
             }
 
             # See if we can convert it to a uri object
             try {
-                $uri = [Uri]::New($Connection)
+                $uri = New-NormalisedUri $Connection
 
                 # Success - Use this object
                 $conn.Connection = $uri.ToString()
-                $conn.Sni = $uri.Host
+                $conn.Sni = $uri.Host.ToString()
                 return
             } catch {
             }
+        }
+
+        # Normalise the Uri
+        try {
+            $conn.Connection = New-NormalisedUri $conn.Connection -AsString
+        } catch {
+            Write-Warning ("Could not normalise the Uri ({0}): {1}" -f $conn.Connection, $_)
+            return
         }
 
         # Configure Sni, if there is a 'Connection' value, but no Sni
         if (![string]::IsNullOrEmpty($conn.Connection) -and [string]::IsNullOrEmpty($conn.Sni))
         {
             try {
-                $conn.Sni = ([Uri]$conn.Connection).Host
+                $conn.Sni = ([Uri]::New($conn.Connection)).Host
             }
             catch {
             }
