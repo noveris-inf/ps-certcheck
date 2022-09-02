@@ -222,7 +222,11 @@ Function Test-EndpointCertificate
         [Int]$TimeoutSec = 10,
 
         [Parameter(Mandatory=$false)]
-        [switch]$AsHashTable = $false
+        [switch]$AsHashTable = $false,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [int]$LogProgressSec = 0
     )
 
     begin
@@ -252,6 +256,11 @@ Function Test-EndpointCertificate
         $state = [PSCustomObject]@{
             runspaces = New-Object System.Collections.Generic.List[PSCustomObject]
             AsHashTable = $AsHashTable
+            Completed = 0
+            Hung = 0
+            LastProgress = [DateTime]::UtcNow
+            BeginTime = $beginTime
+            LogProgressSec = $LogProgressSec
         }
 
         # Create a list of endpoints we've scheduled for checking to avoid duplicates
@@ -273,7 +282,7 @@ Function Test-EndpointCertificate
                     if ($_.Status.IsCompleted)
                     {
                         $completeList.Add($_)
-                    } elseif ($_.StartTime -lt ([DateTime]::Now.AddSeconds(-$hangThresholdSec))) {
+                    } elseif ($_.StartTime -lt ([DateTime]::UtcNow.AddSeconds(-$hangThresholdSec))) {
                         $hungList.Add($_)
                     } else {
                         $tempList.Add($_)
@@ -284,6 +293,9 @@ Function Test-EndpointCertificate
                 # Process completed runspaces
                 $completeList | ForEach-Object {
                     $runspace = $_
+
+                    # Record completed job
+                    $state.Completed++
 
                     # Try to receive the job output, being the HashTable containing
                     # the properties for the check
@@ -310,10 +322,14 @@ Function Test-EndpointCertificate
                 $hungList | ForEach-Object {
                     $runspace = $_
 
+                    # Record hung job
+                    $state.Hung++
+
                     # Try to receive the job output and convert to string
                     try {
-                        Write-Warning ("Stopping hung runspace for {0}:{1}" -f $runspace.Connection, $runspace.Sni)
+                        Write-Warning ("Runspace hang for {0}:{1}. Stopping..." -f $runspace.Connection, $runspace.Sni)
                         $runspace.Runspace.Stop()
+                        Write-Information "Successfully stopped hung runspace"
                     } catch {
                         Write-Warning "Error stopping hung runspace: $_"
                         Write-Warning ($_ | Format-List -property * | Out-String)
@@ -322,6 +338,20 @@ Function Test-EndpointCertificate
                     # Make sure we remove the runspace now
                     $runspace.Runspace.Dispose()
                     $runspace.Status = $null
+                }
+
+                # Progress status
+                $inProgress = $state.runspaces.Count
+                $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds" -f $state.Completed,
+                    $inProgress, $state.Hung, [Math]::Round(([DateTime]::UtcNow - $state.BeginTime).TotalSeconds, 2))
+
+                # Write progress update
+                Write-Progress -Id 1 -Activity "Endpoint Check" -Status $status
+
+                if ($state.LogProgressSec -gt 0 -and $state.LastProgress.AddSeconds($state.LogProgressSec) -lt [DateTime]::UtcNow)
+                {
+                    $state.LastProgress = [DateTime]::UtcNow
+                    Write-Information "Endpoint Check Status: $status"
                 }
 
                 Start-Sleep -Seconds 1
@@ -569,7 +599,7 @@ Function Test-EndpointCertificate
         $state.runspaces.Add([PSCustomObject]@{
             Runspace = $runspace
             Status = $runspace.BeginInvoke()
-            StartTime = [DateTime]::Now
+            StartTime = [DateTime]::UtcNow
             Connection = $conn.Connection
             Sni = $conn.Sni
         })
@@ -580,6 +610,9 @@ Function Test-EndpointCertificate
         # Wait for all runspaces to finish
         Write-Verbose "Waiting for remainder of runspaces to finish"
         Invoke-Command -Script $waitScript -ArgumentList $state, 0
+
+        # Log progress completed
+        Write-Progress -Id 1 -Activity "Endpoint Check" -Completed
 
         Write-Verbose ("Total runtime: {0} seconds" -f ([DateTime]::UtcNow - $beginTime).TotalSeconds)
     }
