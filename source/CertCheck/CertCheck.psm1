@@ -230,6 +230,13 @@ Function Test-EndpointCertificate
         # We'll verbose report on the total run time later on
         $beginTime = [DateTime]::UtcNow
 
+        # Hang threshold
+        $hangThresholdSec = $TimeoutSec * 2
+        if ($hangThresholdSec -lt 30)
+        {
+            $hangThresholdSec = 30
+        }
+
         # Initial session state for the check script. This is to import functions in to the
         # creates runspaces
         $initialSessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
@@ -260,11 +267,14 @@ Function Test-EndpointCertificate
             {
                 # Separate tasks in to 'completed' and not
                 $tempList = New-Object System.Collections.Generic.List[PSCustomObject]
+                $hungList = New-Object System.Collections.Generic.List[PSCustomObject]
                 $completeList = New-Object System.Collections.Generic.List[PSCustomObject]
                 $state.runspaces | ForEach-Object {
                     if ($_.Status.IsCompleted)
                     {
                         $completeList.Add($_)
+                    } elseif ($_.StartTime -lt ([DateTime]::Now.AddSeconds(-$hangThresholdSec))) {
+                        $hungList.Add($_)
                     } else {
                         $tempList.Add($_)
                     }
@@ -288,6 +298,24 @@ Function Test-EndpointCertificate
                         }
                     } catch {
                         Write-Warning "Error reading return from runspace: $_"
+                        Write-Warning ($_ | Format-List -property * | Out-String)
+                    }
+
+                    # Make sure we remove the runspace now
+                    $runspace.Runspace.Dispose()
+                    $runspace.Status = $null
+                }
+
+                # Process hung runspaces
+                $hungList | ForEach-Object {
+                    $runspace = $_
+
+                    # Try to receive the job output and convert to string
+                    try {
+                        Write-Warning ("Stopping hung runspace for {0}:{1}" -f $runspace.Connection, $runspace.Sni)
+                        $runspace.Runspace.Stop()
+                    } catch {
+                        Write-Warning "Error stopping hung runspace: $_"
                         Write-Warning ($_ | Format-List -property * | Out-String)
                     }
 
@@ -541,6 +569,9 @@ Function Test-EndpointCertificate
         $state.runspaces.Add([PSCustomObject]@{
             Runspace = $runspace
             Status = $runspace.BeginInvoke()
+            StartTime = [DateTime]::Now
+            Connection = $conn.Connection
+            Sni = $conn.Sni
         })
     }
 
