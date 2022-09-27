@@ -11,8 +11,10 @@ Set-StrictMode -Version 2
 #>
 Function New-NormalisedUri
 {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '')]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
+    [OutputType([System.Uri])]
     param(
         [Parameter(Mandatory=$true)]
         [ValidateNotNull()]
@@ -211,6 +213,7 @@ Function Get-CertificateData
 #>
 Function Test-EndpointCertificate
 {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '')]
     [CmdletBinding(DefaultParameterSetName="NoPipe")]
     param(
         [Parameter(Mandatory=$true, ValueFromPipeline, Position=0)]
@@ -509,7 +512,7 @@ Function Test-EndpointCertificate
                 # If we can't connect, just stop here
                 if (!$connectStatus.Connected)
                 {
-                    Write-Verbose "Coult not connect to endpoint"
+                    Write-Verbose "Could not connect to endpoint"
                     Write-Error $connectStatus.Error
                 }
 
