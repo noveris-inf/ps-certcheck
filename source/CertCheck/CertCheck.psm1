@@ -364,6 +364,14 @@ Function Test-EndpointCertificate
 
                 Start-Sleep -Seconds 1
             }
+
+            # If we're to log progress, the target is 0 and we've finished the wait loop, then log a final progress
+            if ($state.LogProgressSec -gt 0 -and $target -eq 0)
+            {
+                $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds" -f $state.Completed,
+                    $state.runspaces.Count, $state.Hung, [Math]::Round(([DateTime]::UtcNow - $state.BeginTime).TotalSeconds, 2))
+                Write-Information "Endpoint Check Status: $status"
+            }
         }
     }
 
