@@ -21,7 +21,8 @@ Import-Module ./CertCheck/CertCheck.psm1
     }, "https://www.news.com.au",
     [Uri]"https://toggl.com",
     "https://toggl.com",
-    "https://www.news.com.au"
+    "https://www.news.com.au",
+    "www.news.com.au:443"
 ) | Test-EndpointCertificate | Format-List Connection, Sni, Subject, ErrorMsg
 
 Test-EndpointCertificate -Connection "https://www.google.com.au" | Format-Table Connection, Sni, Subject

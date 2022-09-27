@@ -24,8 +24,16 @@ Function New-NormalisedUri
 
     process
     {
-        # If it's not a URI, attempt to convert to Uri directly
         $uri = $UriObj
+
+        # Check for string without scheme prefix
+        if ($uri.GetType().FullName -eq "System.String" -and $uri -notmatch "://")
+        {
+            # Is a string, but doesn't appear to have a scheme prefix
+            $uri = "https://" + $uri
+        }
+
+        # If it's not a URI, attempt to convert to Uri directly
         if ($uri.GetType().FullName -ne "System.Uri")
         {
             try {
