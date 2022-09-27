@@ -244,9 +244,9 @@ Function Test-EndpointCertificate
 
         # Hang threshold
         $hangThresholdSec = $TimeoutSec * 2
-        if ($hangThresholdSec -lt 30)
+        if ($hangThresholdSec -lt 60)
         {
-            $hangThresholdSec = 30
+            $hangThresholdSec = 60
         }
 
         # Initial session state for the check script. This is to import functions in to the
