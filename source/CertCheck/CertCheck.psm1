@@ -287,16 +287,20 @@ Function Test-EndpointCertificate
             {
                 # Separate tasks in to 'completed' and not
                 $tempList = New-Object System.Collections.Generic.List[PSCustomObject]
-                $hungList = New-Object System.Collections.Generic.List[PSCustomObject]
                 $completeList = New-Object System.Collections.Generic.List[PSCustomObject]
+                $state.Hung = 0
                 $state.runspaces | ForEach-Object {
                     if ($_.Status.IsCompleted)
                     {
                         $completeList.Add($_)
-                    } elseif ($_.StartTime -lt ([DateTime]::UtcNow.AddSeconds(-$hangThresholdSec))) {
-                        $hungList.Add($_)
                     } else {
                         $tempList.Add($_)
+
+                        # If this runspace has been running for too long, consider it hung and update the count
+                        if ($_.StartTime -lt ([DateTime]::UtcNow.AddSeconds(-$hangThresholdSec)))
+                        {
+                            $state.Hung++
+                        }
                     }
                 }
                 $state.runspaces = $tempList
@@ -321,28 +325,6 @@ Function Test-EndpointCertificate
                         }
                     } catch {
                         Write-Warning "Error reading return from runspace: $_"
-                        Write-Warning ($_ | Format-List -property * | Out-String)
-                    }
-
-                    # Make sure we remove the runspace now
-                    $runspace.Runspace.Dispose()
-                    $runspace.Status = $null
-                }
-
-                # Process hung runspaces
-                $hungList | ForEach-Object {
-                    $runspace = $_
-
-                    # Record hung job
-                    $state.Hung++
-
-                    # Try to receive the job output and convert to string
-                    try {
-                        Write-Warning ("Runspace hang for {0}:{1}. Stopping..." -f $runspace.Connection, $runspace.Sni)
-                        $runspace.Runspace.Stop()
-                        Write-Information "Successfully stopped hung runspace"
-                    } catch {
-                        Write-Warning "Error stopping hung runspace: $_"
                         Write-Warning ($_ | Format-List -property * | Out-String)
                     }
 
@@ -575,6 +557,7 @@ Function Test-EndpointCertificate
                 $certPath = ($chain.ChainElements |
                     ForEach-Object { $_.Certificate.Subject.ToString() + [Environment]::NewLine } |
                     Out-String).TrimEnd([Environment]::NewLine)
+                $chain.Dispose()
 
                 # Update the hashtable with the entries we want to update on the CertificateInfo object
                 Write-Verbose ("{0}: Updating object" -f $Connection)
