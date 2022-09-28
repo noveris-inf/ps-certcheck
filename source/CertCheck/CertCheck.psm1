@@ -315,8 +315,24 @@ Function Test-EndpointCertificate
                     # Try to receive the job output, being the HashTable containing
                     # the properties for the check
                     try {
-                        $result = $runspace.Runspace.EndInvoke($runspace.Status) | Select-Object -First 1
+                        $result = $runspace.Runspace.EndInvoke($runspace.Status) | ForEach-Object {
+                            # Filter out anything that isn't a hashtable, but report on it
+                            if ($_.GetType().FullName -ne "System.Collections.Hashtable")
+                            {
+                                Write-Warning "Runspace returned additional data: $_"
+                            } else {
+                                $_
+                            }
+                        }
 
+                        # Make sure we have a single Hashtable
+                        $count = ($result | Measure-Object).Count
+                        if ($count -ne 1)
+                        {
+                            Write-Error "Runspace returned $count Hashtables, should be 1"
+                        }
+
+                        # Pass the Hashtable on in the pipeline
                         if ($state.AsHashTable)
                         {
                             $result
@@ -330,13 +346,15 @@ Function Test-EndpointCertificate
 
                     # Make sure we remove the runspace now
                     $runspace.Runspace.Dispose()
+                    $runspace.Runspace = $null
                     $runspace.Status = $null
                 }
 
                 # Progress status
-                $inProgress = $state.runspaces.Count
-                $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds" -f $state.Completed,
-                    $inProgress, $state.Hung, [Math]::Round(([DateTime]::UtcNow - $state.BeginTime).TotalSeconds, 2))
+                $runtime = ([DateTime]::UtcNow - $state.BeginTime).TotalSeconds
+                $endpointsps = [Math]::Round($state.Completed / $runtime, 2)
+                $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds/{4} p/s" -f $state.Completed,
+                    $state.runspaces.Count, $state.Hung, [Math]::Round($runtime, 2), $endpointsps)
 
                 # Write progress update
                 Write-Progress -Id 1 -Activity "Endpoint Check" -Status $status
@@ -353,8 +371,10 @@ Function Test-EndpointCertificate
             # If we're to log progress, the target is 0 and we've finished the wait loop, then log a final progress
             if ($state.LogProgressSec -gt 0 -and $target -eq 0)
             {
-                $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds" -f $state.Completed,
-                    $state.runspaces.Count, $state.Hung, [Math]::Round(([DateTime]::UtcNow - $state.BeginTime).TotalSeconds, 2))
+                $runtime = ([DateTime]::UtcNow - $state.BeginTime).TotalSeconds
+                $endpointsps = [Math]::Round($state.Completed / $runtime, 2)
+                $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds/{4} p/s" -f $state.Completed,
+                    $state.runspaces.Count, $state.Hung, [Math]::Round($runtime, 2), $endpointsps)
                 Write-Information "Endpoint Check Status: $status"
             }
         }
@@ -462,132 +482,139 @@ Function Test-EndpointCertificate
             $ErrorActionPreference = "Stop"
             Set-StrictMode -Version 2
 
-            # Build status object
-            $status = @{
-                Connection = $Connection
-                Sni = $Sni
-                Connected = $false
-                Subject = ""
-                Issuer = ""
-                NotBefore = [DateTime]::MinValue
-                NotAfter = [DateTime]::MinValue
-                Thumbprint = ""
-                LocallyTrusted = $false
-                Extensions = ""
-                SAN = ""
-                EKU = ""
-                BasicConstraints = ""
-                RawData = ""
-                Addresses = ""
-                CertPath = ""
-                ErrorMsg = ""
-            }
-
-            # Uri object for connection
-            $uri = [Uri]$Connection
-
-            try {
-                # Get-CertificateData doesn't throw errors, just returns the status object
-                # Attempt to connect with certificate validation on first attempt
-                $connectStatus = Get-CertificateData -Uri $Connection -Sni $Sni -TimeoutSec $TimeoutSec
-
-                # If we can't connect, just stop here
-                if (!$connectStatus.Connected)
-                {
-                    Write-Verbose "Could not connect to endpoint"
-                    Write-Error $connectStatus.Error
+            & {
+                # Build status object
+                $status = @{
+                    Connection = $Connection
+                    Sni = $Sni
+                    Connected = $false
+                    Subject = ""
+                    Issuer = ""
+                    NotBefore = [DateTime]::MinValue
+                    NotAfter = [DateTime]::MinValue
+                    Thumbprint = ""
+                    LocallyTrusted = $false
+                    Extensions = ""
+                    SAN = ""
+                    EKU = ""
+                    BasicConstraints = ""
+                    RawData = ""
+                    Addresses = ""
+                    CertPath = ""
+                    ErrorMsg = ""
                 }
 
-                $failedAuth = $false
-                if (!$connectStatus.AuthSuccess -or $null -eq $connectStatus.Certificate)
-                {
-                    # We connected, but failed authentication or didn't receive a certificate
-                    # Attempt to reconnect, but without validation of certificates
-                    Write-Verbose "Validation of remote endpoint failed. Reattempting without validation."
-                    $connectStatus = Get-CertificateData -Uri $Connection -Sni $Sni -TimeoutSec $TimeoutSec -NoValidation
-                    $failedAuth = $true
-                }
+                # Uri object for connection
+                $uri = [Uri]$Connection
 
-                if (!$connectStatus.AuthSuccess -or !$connectStatus.Connected -or $null -eq $connectStatus.Certificate -or ![string]::IsNullOrEmpty($connectStatus.Error))
-                {
-                    # Issue with connecting to the endpoint here. Can't continue
-                    Write-Verbose "Endpoint connectivity or auth failure"
-                    Write-Error $connectStatus.Error
-                }
-
-                $cert = $connectStatus.Certificate
-
-                # Convert the extensions to friendly names with data
-                Write-Verbose ("{0}: Unpacking certificate extensions" -f $Connection)
+                $chain = $null
                 try {
-                    $extensions = $cert.Extensions | Where-Object { $null -ne $_ } | ForEach-Object {
-                        $asndata = New-Object 'System.Security.Cryptography.AsnEncodedData' -ArgumentList $_.Oid, $_.RawData
+                    # Get-CertificateData doesn't throw errors, just returns the status object
+                    # Attempt to connect with certificate validation on first attempt
+                    $connectStatus = Get-CertificateData -Uri $Connection -Sni $Sni -TimeoutSec $TimeoutSec
 
-                        $friendlyName = [string]::Empty
-                        if (!([string]::IsNullOrEmpty($_.Oid.FriendlyName)))
-                        {
-                            $friendlyName = $_.Oid.FriendlyName
-                        }
-
-                        [PSCustomObject]@{
-                            Oid = $_.Oid.Value
-                            FriendlyName = $friendlyName
-                            Value = $asndata.Format($false)
-                        }
+                    # If we can't connect, just stop here
+                    if (!$connectStatus.Connected)
+                    {
+                        Write-Verbose "Could not connect to endpoint"
+                        Write-Error $connectStatus.Error
                     }
+
+                    $failedAuth = $false
+                    if (!$connectStatus.AuthSuccess -or $null -eq $connectStatus.Certificate)
+                    {
+                        # We connected, but failed authentication or didn't receive a certificate
+                        # Attempt to reconnect, but without validation of certificates
+                        Write-Verbose "Validation of remote endpoint failed. Reattempting without validation."
+                        $connectStatus = Get-CertificateData -Uri $Connection -Sni $Sni -TimeoutSec $TimeoutSec -NoValidation
+                        $failedAuth = $true
+                    }
+
+                    if (!$connectStatus.AuthSuccess -or !$connectStatus.Connected -or $null -eq $connectStatus.Certificate -or ![string]::IsNullOrEmpty($connectStatus.Error))
+                    {
+                        # Issue with connecting to the endpoint here. Can't continue
+                        Write-Verbose "Endpoint connectivity or auth failure"
+                        Write-Error $connectStatus.Error
+                    }
+
+                    $cert = $connectStatus.Certificate
+
+                    # Convert the extensions to friendly names with data
+                    Write-Verbose ("{0}: Unpacking certificate extensions" -f $Connection)
+                    try {
+                        $extensions = $cert.Extensions | Where-Object { $null -ne $_ } | ForEach-Object {
+                            $asndata = New-Object 'System.Security.Cryptography.AsnEncodedData' -ArgumentList $_.Oid, $_.RawData
+
+                            $friendlyName = [string]::Empty
+                            if (!([string]::IsNullOrEmpty($_.Oid.FriendlyName)))
+                            {
+                                $friendlyName = $_.Oid.FriendlyName
+                            }
+
+                            [PSCustomObject]@{
+                                Oid = $_.Oid.Value
+                                FriendlyName = $friendlyName
+                                Value = $asndata.Format($false)
+                            }
+                        }
+                    } catch {
+                        Write-Error "Error unpacking extensions: $_"
+                    }
+
+                    # Pack the extensions in to a string object
+                    try {
+                        $extensionStr = ($extensions | ForEach-Object {
+                            ("{0}({1}) = {2}{3}" -f $_.FriendlyName, $_.Oid, $_.Value, [Environment]::NewLine)
+                        } | Out-String).TrimEnd([Environment]::NewLine)
+                    } catch {
+                        Write-Error "Error transforming extensions: $_"
+                    }
+
+                    # Get addresses for this endpoint
+                    $addresses = [System.Net.DNS]::GetHostAddresses($uri.Host)
+
+                    # Build chain information for this certificate
+                    $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::New()
+                    $chain.Build($cert) | Out-Null
+                    $certPath = ($chain.ChainElements |
+                        ForEach-Object { $_.Certificate.Subject.ToString() + [Environment]::NewLine } |
+                        Out-String).TrimEnd([Environment]::NewLine)
+
+                    # Update the hashtable with the entries we want to update on the CertificateInfo object
+                    Write-Verbose ("{0}: Updating object" -f $Connection)
+                    $status["Connected"] = $true
+                    $status["Subject"] = $cert.Subject
+                    $status["Issuer"] = $cert.Issuer
+                    $status["NotBefore"] = $cert.NotBefore.ToUniversalTime()
+                    $status["NotAfter"] = $cert.NotAfter.ToUniversalTime()
+                    $status["Thumbprint"] = $cert.Thumbprint
+                    $status["LocallyTrusted"] = !$failedAuth
+                    $status["Extensions"] = $extensionStr
+                    $status["SAN"] = Get-CertificateExtension -Oid "2.5.29.17" -Extensions $extensions
+                    $status["EKU"] = Get-CertificateExtension -Oid "2.5.29.37" -Extensions $extensions
+                    $status["BasicConstraints"] = Get-CertificateExtension -Oid "2.5.29.19" -Extensions $extensions
+                    $status["RawData"] = [System.Convert]::ToBase64String($cert.RawData)
+
+                    $addressStr = ""
+                    $addresses | ForEach-Object { $addressStr += ($_.ToString() + ", ") }
+                    $addressStr = $addressStr.TrimEnd(", ")
+
+                    $status["Addresses"] = $addressStr
+                    $status["CertPath"] = $certPath
+                    $status["ErrorMsg"] = [string]::Empty
                 } catch {
-                    Write-Error "Error unpacking extensions: $_"
+                    # Write-Warning ("{0}: Failed to check endpoint: {1}" -f $Connection, $_)
+                    $status["ErrorMsg"] = [string]$_
+                } finally {
+                    if ($null -ne $chain)
+                    {
+                        $chain.Dispose()
+                    }
                 }
 
-                # Pack the extensions in to a string object
-                try {
-                    $extensionStr = ($extensions | ForEach-Object {
-                        ("{0}({1}) = {2}{3}" -f $_.FriendlyName, $_.Oid, $_.Value, [Environment]::NewLine)
-                    } | Out-String).TrimEnd([Environment]::NewLine)
-                } catch {
-                    Write-Error "Error transforming extensions: $_"
-                }
-
-                # Get addresses for this endpoint
-                $addresses = [System.Net.DNS]::GetHostAddresses($uri.Host)
-
-                # Build chain information for this certificate
-                $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::New()
-                $chain.Build($cert) | Out-Null
-                $certPath = ($chain.ChainElements |
-                    ForEach-Object { $_.Certificate.Subject.ToString() + [Environment]::NewLine } |
-                    Out-String).TrimEnd([Environment]::NewLine)
-                $chain.Dispose()
-
-                # Update the hashtable with the entries we want to update on the CertificateInfo object
-                Write-Verbose ("{0}: Updating object" -f $Connection)
-                $status["Connected"] = $true
-                $status["Subject"] = $cert.Subject
-                $status["Issuer"] = $cert.Issuer
-                $status["NotBefore"] = $cert.NotBefore.ToUniversalTime()
-                $status["NotAfter"] = $cert.NotAfter.ToUniversalTime()
-                $status["Thumbprint"] = $cert.Thumbprint
-                $status["LocallyTrusted"] = !$failedAuth
-                $status["Extensions"] = $extensionStr
-                $status["SAN"] = Get-CertificateExtension -Oid "2.5.29.17" -Extensions $extensions
-                $status["EKU"] = Get-CertificateExtension -Oid "2.5.29.37" -Extensions $extensions
-                $status["BasicConstraints"] = Get-CertificateExtension -Oid "2.5.29.19" -Extensions $extensions
-                $status["RawData"] = [System.Convert]::ToBase64String($cert.RawData)
-
-                $addressStr = ""
-                $addresses | ForEach-Object { $addressStr += ($_.ToString() + ", ") }
-                $addressStr = $addressStr.TrimEnd(", ")
-
-                $status["Addresses"] = $addressStr
-                $status["CertPath"] = $certPath
-                $status["ErrorMsg"] = [string]::Empty
-            } catch {
-                # Write-Warning ("{0}: Failed to check endpoint: {1}" -f $Connection, $_)
-                $status["ErrorMsg"] = [string]$_
-            }
-
-            # Return the state object
-            $status
+                # Return the state object
+                $status
+            } *>&1
         }
 
         # Schedule a run for this uri
