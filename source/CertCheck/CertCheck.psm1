@@ -209,49 +209,25 @@ Function Get-CertificateData
     }
 }
 
-<#
-#>
-Function Test-EndpointCertificate
+Function New-CertCheckRunspace
 {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '')]
-    [CmdletBinding(DefaultParameterSetName="NoPipe")]
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true, ValueFromPipeline, Position=0)]
-        [ValidateNotNull()]
-        $Connection,
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Connection,
 
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [string]$Sni = "",
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Sni,
 
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [Int]$ConcurrentChecks = 30,
-
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [Int]$TimeoutSec = 10,
-
-        [Parameter(Mandatory=$false)]
-        [switch]$AsHashTable = $false,
-
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [int]$LogProgressSec = 0
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [int]$TimeoutSec
     )
 
-    begin
+    process
     {
-        # We'll verbose report on the total run time later on
-        $beginTime = [DateTime]::UtcNow
-
-        # Hang threshold
-        $hangThresholdSec = $TimeoutSec * 2
-        if ($hangThresholdSec -lt 60)
-        {
-            $hangThresholdSec = 60
-        }
-
         # Initial session state for the check script. This is to import functions in to the
         # creates runspaces
         $initialSessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
@@ -261,218 +237,6 @@ Function Test-EndpointCertificate
             $function = [System.Management.Automation.Runspaces.SessionStateFunctionEntry]::New($_, $content)
             $initialSessionState.Commands.Add($function)
         }
-
-        # Use a custom object so the wait block can replace the list with a new list
-        # (i.e. update the reference)
-        $state = [PSCustomObject]@{
-            runspaces = New-Object System.Collections.Generic.List[PSCustomObject]
-            AsHashTable = $AsHashTable
-            Completed = 0
-            Hung = 0
-            LastProgress = [DateTime]::UtcNow
-            BeginTime = $beginTime
-            LogProgressSec = $LogProgressSec
-        }
-
-        # Create a list of endpoints we've scheduled for checking to avoid duplicates
-        # passed in by pipeline
-        $scheduled = New-Object 'System.Collections.generic.HashSet[string]'
-
-        # Common wait block to use to process finished jobs
-        # $target is the is the high count before we can schedule more checks
-        $waitScript = {
-            param($state, $target)
-
-            while (($state.runspaces | Measure-Object).Count -gt $target)
-            {
-                # Separate tasks in to 'completed' and not
-                $tempList = New-Object System.Collections.Generic.List[PSCustomObject]
-                $completeList = New-Object System.Collections.Generic.List[PSCustomObject]
-                $state.Hung = 0
-                $state.runspaces | ForEach-Object {
-                    if ($_.Status.IsCompleted)
-                    {
-                        $completeList.Add($_)
-                    } else {
-                        $tempList.Add($_)
-
-                        # If this runspace has been running for too long, consider it hung and update the count
-                        if ($_.StartTime -lt ([DateTime]::UtcNow.AddSeconds(-$hangThresholdSec)))
-                        {
-                            $state.Hung++
-                        }
-                    }
-                }
-                $state.runspaces = $tempList
-
-                # Process completed runspaces
-                $completeList | ForEach-Object {
-                    $runspace = $_
-
-                    # Record completed job
-                    $state.Completed++
-
-                    # Try to receive the job output, being the HashTable containing
-                    # the properties for the check
-                    try {
-                        $result = $runspace.Runspace.EndInvoke($runspace.Status) | ForEach-Object {
-                            # Filter out anything that isn't a hashtable, but report on it
-                            if ($_.GetType().FullName -ne "System.Collections.Hashtable")
-                            {
-                                Write-Warning "Runspace returned additional data: $_"
-                            } else {
-                                $_
-                            }
-                        }
-
-                        # Make sure we have a single Hashtable
-                        $count = ($result | Measure-Object).Count
-                        if ($count -ne 1)
-                        {
-                            Write-Error "Runspace returned $count Hashtables, should be 1"
-                        }
-
-                        # Pass the Hashtable on in the pipeline
-                        if ($state.AsHashTable)
-                        {
-                            $result
-                        } else {
-                            [PSCustomObject]$result
-                        }
-                    } catch {
-                        Write-Warning "Error reading return from runspace: $_"
-                        Write-Warning ($_ | Format-List -property * | Out-String)
-                    }
-
-                    # Make sure we remove the runspace now
-                    $runspace.Runspace.Dispose()
-                    $runspace.Runspace = $null
-                    $runspace.Status = $null
-                }
-
-                # Progress status
-                $runtime = ([DateTime]::UtcNow - $state.BeginTime).TotalSeconds
-                $endpointsps = [Math]::Round($state.Completed / $runtime, 2)
-                $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds/{4} p/s" -f $state.Completed,
-                    $state.runspaces.Count, $state.Hung, [Math]::Round($runtime, 2), $endpointsps)
-
-                # Write progress update
-                Write-Progress -Id 1 -Activity "Endpoint Check" -Status $status
-
-                if ($state.LogProgressSec -gt 0 -and $state.LastProgress.AddSeconds($state.LogProgressSec) -lt [DateTime]::UtcNow)
-                {
-                    $state.LastProgress = [DateTime]::UtcNow
-                    Write-Information "Endpoint Check Status: $status"
-                }
-
-                Start-Sleep -Seconds 1
-            }
-
-            # If we're to log progress, the target is 0 and we've finished the wait loop, then log a final progress
-            if ($state.LogProgressSec -gt 0 -and $target -eq 0)
-            {
-                $runtime = ([DateTime]::UtcNow - $state.BeginTime).TotalSeconds
-                $endpointsps = [Math]::Round($state.Completed / $runtime, 2)
-                $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds/{4} p/s" -f $state.Completed,
-                    $state.runspaces.Count, $state.Hung, [Math]::Round($runtime, 2), $endpointsps)
-                Write-Information "Endpoint Check Status: $status"
-            }
-        }
-    }
-
-    process
-    {
-        # Wait for job level to go under ConcurrentChecks
-        Invoke-Command -Script $waitScript -ArgumentList $state, ($ConcurrentChecks-1)
-
-        # Object representing the target of the check
-        $conn = [PSCustomObject]@{
-            Connection = $null
-            Sni = $null
-        }
-
-        & {
-            # Check if we have a Uri object
-            if ($Connection.GetType().FullName -eq "System.Uri")
-            {
-                $conn.Connection = $Connection.AbsoluteUri.ToString()
-                $conn.Sni = $Connection.Host.ToString()
-                return
-            }
-
-            # If it's a HashTable, check for relevant keys
-            if ($Connection.GetType().FullName -eq "System.Collections.Hashtable")
-            {
-                try { $conn.Connection = $Connection["Uri"].ToString() } catch {}
-                try { $conn.Connection = $Connection["Connection"].ToString() } catch {}
-                try { $conn.Sni = $Connection["Sni"].ToString() } catch {}
-
-                return
-            }
-
-            # If it's a custom object, check for members
-            if ($Connection.GetType().FullName -eq "System.Management.Automation.PSCustomObject")
-            {
-                try { $conn.Connection = $Connection.Uri.ToString() } catch {}
-                try { $conn.Connection = $Connection.Connection.ToString() } catch {}
-                try { $conn.Sni = $Connection.Sni.ToString() } catch {}
-
-                return
-            }
-
-            # See if we can convert it to a uri object
-            try {
-                $uri = New-NormalisedUri $Connection
-
-                # Success - Use this object
-                $conn.Connection = $uri.ToString()
-                $conn.Sni = $uri.Host.ToString()
-                return
-            } catch {
-            }
-        }
-
-        # Normalise the Uri
-        try {
-            $conn.Connection = New-NormalisedUri $conn.Connection -AsString
-        } catch {
-            Write-Warning ("Could not normalise the Uri ({0}): {1}" -f $conn.Connection, $_)
-            return
-        }
-
-        # Configure Sni, if there is a 'Connection' value, but no Sni
-        if (![string]::IsNullOrEmpty($conn.Connection) -and [string]::IsNullOrEmpty($conn.Sni))
-        {
-            try {
-                $conn.Sni = ([Uri]::New($conn.Connection)).Host
-            }
-            catch {
-            }
-        }
-
-        # If SNI was provided, unconditionally set the Sni to that, regardless of
-        # what has been determined above
-        if (![string]::IsNullOrEmpty($Sni))
-        {
-            $conn.Sni = $Sni
-        }
-
-        # Make sure we have something valid to continue
-        if ([string]::IsNullOrEmpty($conn.Connection) -or [string]::IsNullOrEmpty($conn.Sni))
-        {
-            Write-Warning ("Could not convert incoming object or invalid inputs: {0}" -f $Connection)
-            return
-        }
-
-        # Check if this combination of connection and uri is already in the scheduled list
-        # and don't check, if it is already present
-        $key = $conn.Connection + ":" + $conn.Sni
-        if ($scheduled.Contains($key))
-        {
-            return
-        }
-
-        $scheduled.Add($key) | Out-Null
 
         # Endpoint check script
         $checkScript = {
@@ -618,27 +382,348 @@ Function Test-EndpointCertificate
         }
 
         # Schedule a run for this uri
-        Write-Verbose ("Scheduling check: {0}:{1}" -f $conn.Connection, $conn.Sni)
+        Write-Verbose ("Scheduling check: {0}:{1}" -f $Connection, $Sni)
         $runspace = [PowerShell]::Create($initialSessionState)
         $runspace.AddScript($checkScript) | Out-Null
-        $runspace.AddParameter("Connection", $conn.Connection) | Out-Null
-        $runspace.AddParameter("Sni", $conn.Sni) | Out-Null
+        $runspace.AddParameter("Connection", $Connection) | Out-Null
+        $runspace.AddParameter("Sni", $Sni) | Out-Null
         $runspace.AddParameter("TimeoutSec", $TimeoutSec) | Out-Null
 
-        $state.runspaces.Add([PSCustomObject]@{
+        [PSCustomObject]@{
             Runspace = $runspace
             Status = $runspace.BeginInvoke()
             StartTime = [DateTime]::UtcNow
             Connection = $conn.Connection
             Sni = $conn.Sni
-        })
+        }
+    }
+}
+
+<#
+#>
+Function Wait-CertCheckRunspaces
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [PSCustomObject]$State,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [int]$Target
+    )
+
+    process
+    {
+        while ($State.runspaces.Count -gt $Target)
+        {
+            # Separate tasks in to completed, in progress and hung
+            $inProgressList = New-Object System.Collections.Generic.List[PSCustomObject]
+            $completeList = New-Object System.Collections.Generic.List[PSCustomObject]
+            $hungList = New-Object System.Collections.Generic.List[PSCustomObject]
+            $State.runspaces | ForEach-Object {
+                if ($_.Status.IsCompleted)
+                {
+                    $completeList.Add($_)
+                    return
+                }
+
+                # If the runspace has been running less than the hang threshold, add to the list to review on next cycle
+                if (([DateTime]::UtcNow - $_.StartTime).TotalSeconds -lt $hangThresholdSec)
+                {
+                    $inProgressList.Add($_)
+                    return
+                }
+
+                # runspace is not complete and is considered to be hung as it has run over the threshold
+                $hungList.Add($_)
+            }
+
+            # If nothing has completed, nothing else is in progress, so there are only hung runspaces left
+            # then process the hung runspaces
+            if ($completeList.Count -eq 0 -and $inProgressList.Count -eq 0 -and $hungList.Count -gt 0)
+            {
+                $hungList | ForEach-Object {
+                    Write-Warning ("Runspace for {0}:{1} has hung. Stopping." -f $_.Connection, $_.Sni)
+                    try {
+                        $_.Runspace.Stop()
+                    } catch {
+                        Write-Warning "Error stopping runspace: $_"
+                    }
+                    $_.Runspace.Dispose()
+                    $_.Runspace = $null
+                    $_.Status = $null
+
+                    Write-Warning ("Scheduling new runspace for {0}:{1}" -f $_.Connection, $_.Sni)
+                    $newRunspace = New-CertCheckRunspace -Connection $_.Connection -Sni $_.Sni -TimeoutSec $State.TimeoutSec
+                    $inProgressList.Add($newRunspace)
+                }
+            } else {
+                # Otherwise, we'll just add them back in to the inprogress list
+                $hungList | ForEach-Object { $inProgressList.Add($_) }
+            }
+
+            $State.runspaces = $inProgressList
+            $State.Hung = $hungList.Count
+
+            # Process completed runspaces
+            $completeList | ForEach-Object {
+                $runspace = $_
+
+                # Record completed job
+                $State.Completed++
+
+                # Try to receive the job output, being the HashTable containing
+                # the properties for the check
+                try {
+                    $result = $runspace.Runspace.EndInvoke($runspace.Status) | ForEach-Object {
+                        # Filter out anything that isn't a hashtable, but report on it
+                        if ($_.GetType().FullName -ne "System.Collections.Hashtable")
+                        {
+                            Write-Warning "Runspace returned additional data: $_"
+                        } else {
+                            $_
+                        }
+                    }
+
+                    # Make sure we have a single Hashtable
+                    $count = ($result | Measure-Object).Count
+                    if ($count -ne 1)
+                    {
+                        Write-Error "Runspace returned $count Hashtables, should be 1"
+                    }
+
+                    # Pass the Hashtable on in the pipeline
+                    if ($State.AsHashTable)
+                    {
+                        $result
+                    } else {
+                        [PSCustomObject]$result
+                    }
+                } catch {
+                    Write-Warning "Error reading return from runspace: $_"
+                    Write-Warning ($_ | Format-List -property * | Out-String)
+                }
+
+                # Make sure we remove the runspace now
+                $runspace.Runspace.Dispose()
+                $runspace.Runspace = $null
+                $runspace.Status = $null
+            }
+
+            # Progress status
+            $status = New-CertCheckProgressMessage -State $State
+
+            # Write progress update
+            Write-Progress -Id 1 -Activity "Endpoint Check" -Status $status
+
+            if ($State.LogProgressSec -gt 0 -and $State.LastProgress.AddSeconds($State.LogProgressSec) -lt [DateTime]::UtcNow)
+            {
+                $State.LastProgress = [DateTime]::UtcNow
+                Write-Information "Endpoint Check Status: $status"
+            }
+
+            Start-Sleep -Seconds 1
+        }
+
+        # If we're to log progress, the target is 0 and we've finished the wait loop, then log a final progress
+        if ($State.LogProgressSec -gt 0 -and $target -eq 0)
+        {
+            $status = New-CertCheckProgressMessage -State $State
+            Write-Information "Endpoint Check Status: $status"
+        }
+    }
+}
+
+<#
+#>
+Function New-CertCheckProgressMessage
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [PSCustomObject]$State
+    )
+
+    process
+    {
+        $runtime = ([DateTime]::UtcNow - $State.BeginTime).TotalSeconds
+        $endpointsps = [Math]::Round($State.Completed / $runtime, 2)
+        $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds/{4} p/s" -f $State.Completed,
+            $State.runspaces.Count, $State.Hung, [Math]::Round($runtime, 2), $endpointsps)
+
+        $status
+    }
+}
+
+<#
+#>
+Function Test-EndpointCertificate
+{
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '')]
+    [CmdletBinding(DefaultParameterSetName="NoPipe")]
+    param(
+        [Parameter(Mandatory=$true, ValueFromPipeline, Position=0)]
+        [ValidateNotNull()]
+        $Connection,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [string]$Sni = "",
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [Int]$ConcurrentChecks = 30,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [Int]$TimeoutSec = 10,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$AsHashTable = $false,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [int]$LogProgressSec = 0
+    )
+
+    begin
+    {
+        # We'll verbose report on the total run time later on
+        $beginTime = [DateTime]::UtcNow
+
+        # Hang threshold
+        $hangThresholdSec = $TimeoutSec * 2
+        if ($hangThresholdSec -lt 60)
+        {
+            $hangThresholdSec = 60
+        }
+
+        # Use a custom object so the wait block can replace the list with a new list
+        # (i.e. update the reference)
+        $state = [PSCustomObject]@{
+            runspaces = New-Object System.Collections.Generic.List[PSCustomObject]
+            AsHashTable = $AsHashTable
+            Completed = 0
+            Hung = 0
+            LastProgress = [DateTime]::UtcNow
+            BeginTime = $beginTime
+            LogProgressSec = $LogProgressSec
+            TimeoutSec = $TimeoutSec
+        }
+
+        # Create a list of endpoints we've scheduled for checking to avoid duplicates
+        # passed in by pipeline
+        $scheduled = New-Object 'System.Collections.generic.HashSet[string]'
+    }
+
+    process
+    {
+        # Wait for job level to go under ConcurrentChecks
+        Wait-CertCheckRunspaces -State $state -target ($ConcurrentChecks-1)
+
+        # Object representing the target of the check
+        $conn = [PSCustomObject]@{
+            Connection = $null
+            Sni = $null
+        }
+
+        & {
+            # Check if we have a Uri object
+            if ($Connection.GetType().FullName -eq "System.Uri")
+            {
+                $conn.Connection = $Connection.AbsoluteUri.ToString()
+                $conn.Sni = $Connection.Host.ToString()
+                return
+            }
+
+            # If it's a HashTable, check for relevant keys
+            if ($Connection.GetType().FullName -eq "System.Collections.Hashtable")
+            {
+                try { $conn.Connection = $Connection["Uri"].ToString() } catch {}
+                try { $conn.Connection = $Connection["Connection"].ToString() } catch {}
+                try { $conn.Sni = $Connection["Sni"].ToString() } catch {}
+
+                return
+            }
+
+            # If it's a custom object, check for members
+            if ($Connection.GetType().FullName -eq "System.Management.Automation.PSCustomObject")
+            {
+                try { $conn.Connection = $Connection.Uri.ToString() } catch {}
+                try { $conn.Connection = $Connection.Connection.ToString() } catch {}
+                try { $conn.Sni = $Connection.Sni.ToString() } catch {}
+
+                return
+            }
+
+            # See if we can convert it to a uri object
+            try {
+                $uri = New-NormalisedUri $Connection
+
+                # Success - Use this object
+                $conn.Connection = $uri.ToString()
+                $conn.Sni = $uri.Host.ToString()
+                return
+            } catch {
+            }
+        }
+
+        # Normalise the Uri
+        try {
+            $conn.Connection = New-NormalisedUri $conn.Connection -AsString
+        } catch {
+            Write-Warning ("Could not normalise the Uri ({0}): {1}" -f $conn.Connection, $_)
+            return
+        }
+
+        # Configure Sni, if there is a 'Connection' value, but no Sni
+        if (![string]::IsNullOrEmpty($conn.Connection) -and [string]::IsNullOrEmpty($conn.Sni))
+        {
+            try {
+                $conn.Sni = ([Uri]::New($conn.Connection)).Host
+            }
+            catch {
+            }
+        }
+
+        # If SNI was provided, unconditionally set the Sni to that, regardless of
+        # what has been determined above
+        if (![string]::IsNullOrEmpty($Sni))
+        {
+            $conn.Sni = $Sni
+        }
+
+        # Make sure we have something valid to continue
+        if ([string]::IsNullOrEmpty($conn.Connection) -or [string]::IsNullOrEmpty($conn.Sni))
+        {
+            Write-Warning ("Could not convert incoming object or invalid inputs: {0}" -f $Connection)
+            return
+        }
+
+        # Check if this combination of connection and uri is already in the scheduled list
+        # and don't check, if it is already present
+        $key = $conn.Connection + ":" + $conn.Sni
+        if ($scheduled.Contains($key))
+        {
+            return
+        }
+
+        # Record that we've scheduled a check for this
+        $scheduled.Add($key) | Out-Null
+
+        # Create a new runspace to perform the check for this connection & sni
+        $runspace = New-CertCheckRunspace -Connection $conn.Connection -Sni $conn.Sni -TimeoutSec $TimeoutSec
+        $state.runspaces.Add($runspace)
     }
 
     end
     {
         # Wait for all runspaces to finish
         Write-Verbose "Waiting for remainder of runspaces to finish"
-        Invoke-Command -Script $waitScript -ArgumentList $state, 0
+        Wait-CertCheckRunspaces -State $state -Target 0
 
         # Log progress completed
         Write-Progress -Id 1 -Activity "Endpoint Check" -Completed
