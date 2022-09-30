@@ -7,6 +7,23 @@ $ErrorActionPreference = "Stop"
 $InformationPreference = "Continue"
 Set-StrictMode -Version 2
 
+Add-Type @"
+    using System;
+    using System.Net;
+    using System.Net.Security;
+    using System.Security.Cryptography.X509Certificates;
+    public class ServerCertificateValidationCallback
+    {
+        public static bool IgnoreCertificateValidation(Object obj,
+            X509Certificate certificate,
+            X509Chain chain,
+            SslPolicyErrors errors)
+        {
+            return true;
+        }
+    }
+"@
+
 <#
 #>
 Function New-NormalisedUri
@@ -171,33 +188,44 @@ Function Get-CertificateData
             # Update status
             $status.Connected = $true
 
-            # Configure the SslStream connection
-            $stream = $null
-            if ($NoValidation)
-            {
-                $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false, $certValidation
-            } else {
-                $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false
+            try {
+                # Configure the SslStream connection
+                $stream = $null
+                if ($NoValidation)
+                {
+                    $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false, ([ServerCertificateValidationCallback]::IgnoreCertificateValidation)
+                } else {
+                    $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false
+                }
+
+                # This supplies the SNI to the endpoint
+                Write-Verbose ("{0}: Sending SNI as {1}" -f $Uri, $Sni)
+                $sslConnect = $stream.AuthenticateAsClientAsync($Sni)
+                $sslConnect.Wait($TimeoutSec * 1000) | Out-Null
+
+                if (!$sslConnect.IsCompleted)
+                {
+                    # Connected but failed to perform TLS negotiation
+                    Write-Error "Failed to negotiate TLS with endpoint"
+                }
+
+                # Capture the remote certificate from the stream
+                Write-Verbose ("{0}: Retrieving remote certificate" -f $Uri)
+                $status.Certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::New($stream.RemoteCertificate)
+
+                # Update status
+                $status.AuthSuccess = $true
+            } catch {
+                $status.Error = "Failed to negotiate TLS: $_"
+            } finally {
+                if ($null -ne $stream)
+                {
+                    $stream.Dispose()
+                }
             }
-
-            # This supplies the SNI to the endpoint
-            Write-Verbose ("{0}: Sending SNI as {1}" -f $Uri, $Sni)
-            $stream.AuthenticateAsClient($Sni)
-
-            # Update status
-            $status.AuthSuccess = $true
-
-            # Capture the remote certificate from the stream
-            Write-Verbose ("{0}: Retrieving remote certificate" -f $Uri)
-            $status.Certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::New($stream.RemoteCertificate)
         } catch {
-            $status.Error = $_.ToString()
+            $status.Error = "Failed to connect: $_"
         } finally {
-            if ($null -ne $stream)
-            {
-                $stream.Dispose()
-            }
-
             if ($null -ne $client)
             {
                 $client.Dispose()
@@ -206,6 +234,180 @@ Function Get-CertificateData
 
         # Return status object
         $status
+    }
+}
+
+<#
+#>
+Function Test-EndpointCertificate
+{
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '')]
+    [CmdletBinding(DefaultParameterSetName="NoPipe")]
+    param(
+        [Parameter(Mandatory=$true, ValueFromPipeline, Position=0)]
+        [ValidateNotNull()]
+        $Connection,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [string]$Sni = "",
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [Int]$ConcurrentChecks = 30,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [Int]$TimeoutSec = 10,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$AsHashTable = $false,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [int]$LogProgressSec = 0
+    )
+
+    begin
+    {
+        # We'll verbose report on the total run time later on
+        $beginTime = [DateTime]::UtcNow
+
+        # Hang threshold
+        $hangThresholdSec = $TimeoutSec * 2
+        if ($hangThresholdSec -lt 60)
+        {
+            $hangThresholdSec = 60
+        }
+
+        # State object to assist with managing runspaces
+        $state = [PSCustomObject]@{
+            runspaces = New-Object System.Collections.Generic.List[PSCustomObject]
+            AsHashTable = $AsHashTable
+            Completed = 0
+            Hung = 0
+            LastProgress = [DateTime]::UtcNow
+            BeginTime = $beginTime
+            LogProgressSec = $LogProgressSec
+            TimeoutSec = $TimeoutSec
+            HangThresholdSec = $hangThresholdSec
+        }
+
+        # Create a list of endpoints we've scheduled for checking to avoid duplicates
+        # passed in by pipeline
+        $scheduled = New-Object 'System.Collections.generic.HashSet[string]'
+    }
+
+    process
+    {
+        # Wait for job level to go under ConcurrentChecks
+        Wait-CertCheckRunspaces -State $state -target ($ConcurrentChecks-1)
+
+        # Object representing the target of the check
+        $conn = [PSCustomObject]@{
+            Connection = $null
+            Sni = $null
+        }
+
+        & {
+            # Check if we have a Uri object
+            if ($Connection.GetType().FullName -eq "System.Uri")
+            {
+                $conn.Connection = $Connection.AbsoluteUri.ToString()
+                $conn.Sni = $Connection.Host.ToString()
+                return
+            }
+
+            # If it's a HashTable, check for relevant keys
+            if ($Connection.GetType().FullName -eq "System.Collections.Hashtable")
+            {
+                try { $conn.Connection = $Connection["Uri"].ToString() } catch {}
+                try { $conn.Connection = $Connection["Connection"].ToString() } catch {}
+                try { $conn.Sni = $Connection["Sni"].ToString() } catch {}
+
+                return
+            }
+
+            # If it's a custom object, check for members
+            if ($Connection.GetType().FullName -eq "System.Management.Automation.PSCustomObject")
+            {
+                try { $conn.Connection = $Connection.Uri.ToString() } catch {}
+                try { $conn.Connection = $Connection.Connection.ToString() } catch {}
+                try { $conn.Sni = $Connection.Sni.ToString() } catch {}
+
+                return
+            }
+
+            # See if we can convert it to a uri object
+            try {
+                $uri = New-NormalisedUri $Connection
+
+                # Success - Use this object
+                $conn.Connection = $uri.ToString()
+                $conn.Sni = $uri.Host.ToString()
+                return
+            } catch {
+            }
+        }
+
+        # Normalise the Uri
+        try {
+            $conn.Connection = New-NormalisedUri $conn.Connection -AsString
+        } catch {
+            Write-Warning ("Could not normalise the Uri ({0}): {1}" -f $conn.Connection, $_)
+            return
+        }
+
+        # Configure Sni, if there is a 'Connection' value, but no Sni
+        if (![string]::IsNullOrEmpty($conn.Connection) -and [string]::IsNullOrEmpty($conn.Sni))
+        {
+            try {
+                $conn.Sni = ([Uri]::New($conn.Connection)).Host
+            }
+            catch {
+            }
+        }
+
+        # If SNI was provided, unconditionally set the Sni to that, regardless of
+        # what has been determined above
+        if (![string]::IsNullOrEmpty($Sni))
+        {
+            $conn.Sni = $Sni
+        }
+
+        # Make sure we have something valid to continue
+        if ([string]::IsNullOrEmpty($conn.Connection) -or [string]::IsNullOrEmpty($conn.Sni))
+        {
+            Write-Warning ("Could not convert incoming object or invalid inputs: {0}" -f $Connection)
+            return
+        }
+
+        # Check if this combination of connection and uri is already in the scheduled list
+        # and don't check, if it is already present
+        $key = $conn.Connection + ":" + $conn.Sni
+        if ($scheduled.Contains($key))
+        {
+            return
+        }
+
+        # Record that we've scheduled a check for this
+        $scheduled.Add($key) | Out-Null
+
+        # Create a new runspace to perform the check for this connection and sni
+        $runspace = New-CertCheckRunspace -Connection $conn.Connection -Sni $conn.Sni -TimeoutSec $TimeoutSec
+        $state.runspaces.Add($runspace)
+    }
+
+    end
+    {
+        # Wait for all runspaces to finish
+        Write-Verbose "Waiting for remainder of runspaces to finish"
+        Wait-CertCheckRunspaces -State $state -Target 0
+
+        # Log progress completed
+        Write-Progress -Id 1 -Activity "Endpoint Check" -Completed
+
+        Write-Verbose ("Total runtime: {0} seconds" -f ([DateTime]::UtcNow - $beginTime).TotalSeconds)
     }
 }
 
@@ -430,7 +632,7 @@ Function Wait-CertCheckRunspaces
                 }
 
                 # If the runspace has been running less than the hang threshold, add to the list to review on next cycle
-                if (([DateTime]::UtcNow - $_.StartTime).TotalSeconds -lt $hangThresholdSec)
+                if (([DateTime]::UtcNow - $_.StartTime).TotalSeconds -lt $State.HangThresholdSec)
                 {
                     $inProgressList.Add($_)
                     return
@@ -555,179 +757,5 @@ Function New-CertCheckProgressMessage
             $State.runspaces.Count, $State.Hung, [Math]::Round($runtime, 2), $endpointsps)
 
         $status
-    }
-}
-
-<#
-#>
-Function Test-EndpointCertificate
-{
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '')]
-    [CmdletBinding(DefaultParameterSetName="NoPipe")]
-    param(
-        [Parameter(Mandatory=$true, ValueFromPipeline, Position=0)]
-        [ValidateNotNull()]
-        $Connection,
-
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [string]$Sni = "",
-
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [Int]$ConcurrentChecks = 30,
-
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [Int]$TimeoutSec = 10,
-
-        [Parameter(Mandatory=$false)]
-        [switch]$AsHashTable = $false,
-
-        [Parameter(Mandatory=$false)]
-        [ValidateNotNull()]
-        [int]$LogProgressSec = 0
-    )
-
-    begin
-    {
-        # We'll verbose report on the total run time later on
-        $beginTime = [DateTime]::UtcNow
-
-        # Hang threshold
-        $hangThresholdSec = $TimeoutSec * 2
-        if ($hangThresholdSec -lt 60)
-        {
-            $hangThresholdSec = 60
-        }
-
-        # Use a custom object so the wait block can replace the list with a new list
-        # (i.e. update the reference)
-        $state = [PSCustomObject]@{
-            runspaces = New-Object System.Collections.Generic.List[PSCustomObject]
-            AsHashTable = $AsHashTable
-            Completed = 0
-            Hung = 0
-            LastProgress = [DateTime]::UtcNow
-            BeginTime = $beginTime
-            LogProgressSec = $LogProgressSec
-            TimeoutSec = $TimeoutSec
-        }
-
-        # Create a list of endpoints we've scheduled for checking to avoid duplicates
-        # passed in by pipeline
-        $scheduled = New-Object 'System.Collections.generic.HashSet[string]'
-    }
-
-    process
-    {
-        # Wait for job level to go under ConcurrentChecks
-        Wait-CertCheckRunspaces -State $state -target ($ConcurrentChecks-1)
-
-        # Object representing the target of the check
-        $conn = [PSCustomObject]@{
-            Connection = $null
-            Sni = $null
-        }
-
-        & {
-            # Check if we have a Uri object
-            if ($Connection.GetType().FullName -eq "System.Uri")
-            {
-                $conn.Connection = $Connection.AbsoluteUri.ToString()
-                $conn.Sni = $Connection.Host.ToString()
-                return
-            }
-
-            # If it's a HashTable, check for relevant keys
-            if ($Connection.GetType().FullName -eq "System.Collections.Hashtable")
-            {
-                try { $conn.Connection = $Connection["Uri"].ToString() } catch {}
-                try { $conn.Connection = $Connection["Connection"].ToString() } catch {}
-                try { $conn.Sni = $Connection["Sni"].ToString() } catch {}
-
-                return
-            }
-
-            # If it's a custom object, check for members
-            if ($Connection.GetType().FullName -eq "System.Management.Automation.PSCustomObject")
-            {
-                try { $conn.Connection = $Connection.Uri.ToString() } catch {}
-                try { $conn.Connection = $Connection.Connection.ToString() } catch {}
-                try { $conn.Sni = $Connection.Sni.ToString() } catch {}
-
-                return
-            }
-
-            # See if we can convert it to a uri object
-            try {
-                $uri = New-NormalisedUri $Connection
-
-                # Success - Use this object
-                $conn.Connection = $uri.ToString()
-                $conn.Sni = $uri.Host.ToString()
-                return
-            } catch {
-            }
-        }
-
-        # Normalise the Uri
-        try {
-            $conn.Connection = New-NormalisedUri $conn.Connection -AsString
-        } catch {
-            Write-Warning ("Could not normalise the Uri ({0}): {1}" -f $conn.Connection, $_)
-            return
-        }
-
-        # Configure Sni, if there is a 'Connection' value, but no Sni
-        if (![string]::IsNullOrEmpty($conn.Connection) -and [string]::IsNullOrEmpty($conn.Sni))
-        {
-            try {
-                $conn.Sni = ([Uri]::New($conn.Connection)).Host
-            }
-            catch {
-            }
-        }
-
-        # If SNI was provided, unconditionally set the Sni to that, regardless of
-        # what has been determined above
-        if (![string]::IsNullOrEmpty($Sni))
-        {
-            $conn.Sni = $Sni
-        }
-
-        # Make sure we have something valid to continue
-        if ([string]::IsNullOrEmpty($conn.Connection) -or [string]::IsNullOrEmpty($conn.Sni))
-        {
-            Write-Warning ("Could not convert incoming object or invalid inputs: {0}" -f $Connection)
-            return
-        }
-
-        # Check if this combination of connection and uri is already in the scheduled list
-        # and don't check, if it is already present
-        $key = $conn.Connection + ":" + $conn.Sni
-        if ($scheduled.Contains($key))
-        {
-            return
-        }
-
-        # Record that we've scheduled a check for this
-        $scheduled.Add($key) | Out-Null
-
-        # Create a new runspace to perform the check for this connection & sni
-        $runspace = New-CertCheckRunspace -Connection $conn.Connection -Sni $conn.Sni -TimeoutSec $TimeoutSec
-        $state.runspaces.Add($runspace)
-    }
-
-    end
-    {
-        # Wait for all runspaces to finish
-        Write-Verbose "Waiting for remainder of runspaces to finish"
-        Wait-CertCheckRunspaces -State $state -Target 0
-
-        # Log progress completed
-        Write-Progress -Id 1 -Activity "Endpoint Check" -Completed
-
-        Write-Verbose ("Total runtime: {0} seconds" -f ([DateTime]::UtcNow - $beginTime).TotalSeconds)
     }
 }
