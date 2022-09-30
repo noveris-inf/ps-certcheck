@@ -7,6 +7,23 @@ $ErrorActionPreference = "Stop"
 $InformationPreference = "Continue"
 Set-StrictMode -Version 2
 
+Add-Type @"
+    using System;
+    using System.Net;
+    using System.Net.Security;
+    using System.Security.Cryptography.X509Certificates;
+    public class ServerCertificateValidationCallback
+    {
+        public static bool IgnoreCertificateValidation(Object obj,
+            X509Certificate certificate,
+            X509Chain chain,
+            SslPolicyErrors errors)
+        {
+            return true;
+        }
+    }
+"@
+
 <#
 #>
 Function New-NormalisedUri
@@ -171,33 +188,44 @@ Function Get-CertificateData
             # Update status
             $status.Connected = $true
 
-            # Configure the SslStream connection
-            $stream = $null
-            if ($NoValidation)
-            {
-                $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false, $certValidation
-            } else {
-                $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false
+            try {
+                # Configure the SslStream connection
+                $stream = $null
+                if ($NoValidation)
+                {
+                    $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false, ([ServerCertificateValidationCallback]::IgnoreCertificateValidation)
+                } else {
+                    $stream = New-Object System.Net.Security.SslStream -ArgumentList $client.GetStream(), $false
+                }
+
+                # This supplies the SNI to the endpoint
+                Write-Verbose ("{0}: Sending SNI as {1}" -f $Uri, $Sni)
+                $sslConnect = $stream.AuthenticateAsClientAsync($Sni)
+                $sslConnect.Wait($TimeoutSec * 1000) | Out-Null
+
+                if (!$sslConnect.IsCompleted)
+                {
+                    # Connected but failed to perform TLS negotiation
+                    Write-Error "Failed to negotiate TLS with endpoint"
+                }
+
+                # Capture the remote certificate from the stream
+                Write-Verbose ("{0}: Retrieving remote certificate" -f $Uri)
+                $status.Certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::New($stream.RemoteCertificate)
+
+                # Update status
+                $status.AuthSuccess = $true
+            } catch {
+                $status.Error = "Failed to negotiate TLS: $_"
+            } finally {
+                if ($null -ne $stream)
+                {
+                    $stream.Dispose()
+                }
             }
-
-            # This supplies the SNI to the endpoint
-            Write-Verbose ("{0}: Sending SNI as {1}" -f $Uri, $Sni)
-            $stream.AuthenticateAsClient($Sni)
-
-            # Update status
-            $status.AuthSuccess = $true
-
-            # Capture the remote certificate from the stream
-            Write-Verbose ("{0}: Retrieving remote certificate" -f $Uri)
-            $status.Certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::New($stream.RemoteCertificate)
         } catch {
-            $status.Error = $_.ToString()
+            $status.Error = "Failed to connect: $_"
         } finally {
-            if ($null -ne $stream)
-            {
-                $stream.Dispose()
-            }
-
             if ($null -ne $client)
             {
                 $client.Dispose()
@@ -246,24 +274,13 @@ Function Test-EndpointCertificate
         $beginTime = [DateTime]::UtcNow
 
         # Hang threshold
-        $hangThresholdSec = $TimeoutSec * 2
+        $hangThresholdSec = $TimeoutSec * 3
         if ($hangThresholdSec -lt 60)
         {
             $hangThresholdSec = 60
         }
 
-        # Initial session state for the check script. This is to import functions in to the
-        # creates runspaces
-        $initialSessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-
-        @("Get-CertificateData", "Get-CertificateExtension") | ForEach-Object {
-            $content = Get-Content Function:\$_ | Out-String
-            $function = [System.Management.Automation.Runspaces.SessionStateFunctionEntry]::New($_, $content)
-            $initialSessionState.Commands.Add($function)
-        }
-
-        # Use a custom object so the wait block can replace the list with a new list
-        # (i.e. update the reference)
+        # State object to assist with managing runspaces
         $state = [PSCustomObject]@{
             runspaces = New-Object System.Collections.Generic.List[PSCustomObject]
             AsHashTable = $AsHashTable
@@ -272,118 +289,19 @@ Function Test-EndpointCertificate
             LastProgress = [DateTime]::UtcNow
             BeginTime = $beginTime
             LogProgressSec = $LogProgressSec
+            TimeoutSec = $TimeoutSec
+            HangThresholdSec = $hangThresholdSec
         }
 
         # Create a list of endpoints we've scheduled for checking to avoid duplicates
         # passed in by pipeline
         $scheduled = New-Object 'System.Collections.generic.HashSet[string]'
-
-        # Common wait block to use to process finished jobs
-        # $target is the is the high count before we can schedule more checks
-        $waitScript = {
-            param($state, $target)
-
-            while (($state.runspaces | Measure-Object).Count -gt $target)
-            {
-                # Separate tasks in to 'completed' and not
-                $tempList = New-Object System.Collections.Generic.List[PSCustomObject]
-                $completeList = New-Object System.Collections.Generic.List[PSCustomObject]
-                $state.Hung = 0
-                $state.runspaces | ForEach-Object {
-                    if ($_.Status.IsCompleted)
-                    {
-                        $completeList.Add($_)
-                    } else {
-                        $tempList.Add($_)
-
-                        # If this runspace has been running for too long, consider it hung and update the count
-                        if ($_.StartTime -lt ([DateTime]::UtcNow.AddSeconds(-$hangThresholdSec)))
-                        {
-                            $state.Hung++
-                        }
-                    }
-                }
-                $state.runspaces = $tempList
-
-                # Process completed runspaces
-                $completeList | ForEach-Object {
-                    $runspace = $_
-
-                    # Record completed job
-                    $state.Completed++
-
-                    # Try to receive the job output, being the HashTable containing
-                    # the properties for the check
-                    try {
-                        $result = $runspace.Runspace.EndInvoke($runspace.Status) | ForEach-Object {
-                            # Filter out anything that isn't a hashtable, but report on it
-                            if ($_.GetType().FullName -ne "System.Collections.Hashtable")
-                            {
-                                Write-Warning "Runspace returned additional data: $_"
-                            } else {
-                                $_
-                            }
-                        }
-
-                        # Make sure we have a single Hashtable
-                        $count = ($result | Measure-Object).Count
-                        if ($count -ne 1)
-                        {
-                            Write-Error "Runspace returned $count Hashtables, should be 1"
-                        }
-
-                        # Pass the Hashtable on in the pipeline
-                        if ($state.AsHashTable)
-                        {
-                            $result
-                        } else {
-                            [PSCustomObject]$result
-                        }
-                    } catch {
-                        Write-Warning "Error reading return from runspace: $_"
-                        Write-Warning ($_ | Format-List -property * | Out-String)
-                    }
-
-                    # Make sure we remove the runspace now
-                    $runspace.Runspace.Dispose()
-                    $runspace.Runspace = $null
-                    $runspace.Status = $null
-                }
-
-                # Progress status
-                $runtime = ([DateTime]::UtcNow - $state.BeginTime).TotalSeconds
-                $endpointsps = [Math]::Round($state.Completed / $runtime, 2)
-                $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds/{4} p/s" -f $state.Completed,
-                    $state.runspaces.Count, $state.Hung, [Math]::Round($runtime, 2), $endpointsps)
-
-                # Write progress update
-                Write-Progress -Id 1 -Activity "Endpoint Check" -Status $status
-
-                if ($state.LogProgressSec -gt 0 -and $state.LastProgress.AddSeconds($state.LogProgressSec) -lt [DateTime]::UtcNow)
-                {
-                    $state.LastProgress = [DateTime]::UtcNow
-                    Write-Information "Endpoint Check Status: $status"
-                }
-
-                Start-Sleep -Seconds 1
-            }
-
-            # If we're to log progress, the target is 0 and we've finished the wait loop, then log a final progress
-            if ($state.LogProgressSec -gt 0 -and $target -eq 0)
-            {
-                $runtime = ([DateTime]::UtcNow - $state.BeginTime).TotalSeconds
-                $endpointsps = [Math]::Round($state.Completed / $runtime, 2)
-                $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds/{4} p/s" -f $state.Completed,
-                    $state.runspaces.Count, $state.Hung, [Math]::Round($runtime, 2), $endpointsps)
-                Write-Information "Endpoint Check Status: $status"
-            }
-        }
     }
 
     process
     {
         # Wait for job level to go under ConcurrentChecks
-        Invoke-Command -Script $waitScript -ArgumentList $state, ($ConcurrentChecks-1)
+        Wait-CertCheckRunspaces -State $state -target ($ConcurrentChecks-1)
 
         # Object representing the target of the check
         $conn = [PSCustomObject]@{
@@ -472,7 +390,55 @@ Function Test-EndpointCertificate
             return
         }
 
+        # Record that we've scheduled a check for this
         $scheduled.Add($key) | Out-Null
+
+        # Create a new runspace to perform the check for this connection and sni
+        $runspace = New-CertCheckRunspace -Connection $conn.Connection -Sni $conn.Sni -TimeoutSec $TimeoutSec
+        $state.runspaces.Add($runspace)
+    }
+
+    end
+    {
+        # Wait for all runspaces to finish
+        Write-Verbose "Waiting for remainder of runspaces to finish"
+        Wait-CertCheckRunspaces -State $state -Target 0
+
+        # Log progress completed
+        Write-Progress -Id 1 -Activity "Endpoint Check" -Completed
+
+        Write-Verbose ("Total runtime: {0} seconds" -f ([DateTime]::UtcNow - $beginTime).TotalSeconds)
+    }
+}
+
+Function New-CertCheckRunspace
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Connection,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Sni,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [int]$TimeoutSec
+    )
+
+    process
+    {
+        # Initial session state for the check script. This is to import functions in to the
+        # creates runspaces
+        $initialSessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+
+        @("Get-CertificateData", "Get-CertificateExtension") | ForEach-Object {
+            $content = Get-Content Function:\$_ | Out-String
+            $function = [System.Management.Automation.Runspaces.SessionStateFunctionEntry]::New($_, $content)
+            $initialSessionState.Commands.Add($function)
+        }
 
         # Endpoint check script
         $checkScript = {
@@ -618,31 +584,178 @@ Function Test-EndpointCertificate
         }
 
         # Schedule a run for this uri
-        Write-Verbose ("Scheduling check: {0}:{1}" -f $conn.Connection, $conn.Sni)
+        Write-Verbose ("Scheduling check: {0}:{1}" -f $Connection, $Sni)
         $runspace = [PowerShell]::Create($initialSessionState)
         $runspace.AddScript($checkScript) | Out-Null
-        $runspace.AddParameter("Connection", $conn.Connection) | Out-Null
-        $runspace.AddParameter("Sni", $conn.Sni) | Out-Null
+        $runspace.AddParameter("Connection", $Connection) | Out-Null
+        $runspace.AddParameter("Sni", $Sni) | Out-Null
         $runspace.AddParameter("TimeoutSec", $TimeoutSec) | Out-Null
 
-        $state.runspaces.Add([PSCustomObject]@{
+        [PSCustomObject]@{
             Runspace = $runspace
             Status = $runspace.BeginInvoke()
             StartTime = [DateTime]::UtcNow
             Connection = $conn.Connection
             Sni = $conn.Sni
-        })
+        }
     }
+}
 
-    end
+<#
+#>
+Function Wait-CertCheckRunspaces
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [PSCustomObject]$State,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [int]$Target
+    )
+
+    process
     {
-        # Wait for all runspaces to finish
-        Write-Verbose "Waiting for remainder of runspaces to finish"
-        Invoke-Command -Script $waitScript -ArgumentList $state, 0
+        while ($State.runspaces.Count -gt $Target)
+        {
+            # Separate tasks in to completed, in progress and hung
+            $inProgressList = New-Object System.Collections.Generic.List[PSCustomObject]
+            $completeList = New-Object System.Collections.Generic.List[PSCustomObject]
+            $hungList = New-Object System.Collections.Generic.List[PSCustomObject]
+            $State.runspaces | ForEach-Object {
+                if ($_.Status.IsCompleted)
+                {
+                    $completeList.Add($_)
+                    return
+                }
 
-        # Log progress completed
-        Write-Progress -Id 1 -Activity "Endpoint Check" -Completed
+                # If the runspace has been running less than the hang threshold, add to the list to review on next cycle
+                if (([DateTime]::UtcNow - $_.StartTime).TotalSeconds -lt $State.HangThresholdSec)
+                {
+                    $inProgressList.Add($_)
+                    return
+                }
 
-        Write-Verbose ("Total runtime: {0} seconds" -f ([DateTime]::UtcNow - $beginTime).TotalSeconds)
+                # runspace is not complete and is considered to be hung as it has run over the threshold
+                $hungList.Add($_)
+            }
+
+            # If nothing has completed, nothing else is in progress, so there are only hung runspaces left
+            # then process the hung runspaces
+            if ($completeList.Count -eq 0 -and $inProgressList.Count -eq 0 -and $hungList.Count -gt 0)
+            {
+                $hungList | ForEach-Object {
+                    Write-Warning ("Runspace for {0}:{1} has hung. Stopping." -f $_.Connection, $_.Sni)
+                    try {
+                        $_.Runspace.Stop()
+                    } catch {
+                        Write-Warning "Error stopping runspace: $_"
+                    }
+                    $_.Runspace.Dispose()
+                    $_.Runspace = $null
+                    $_.Status = $null
+
+                    Write-Warning ("Scheduling new runspace for {0}:{1}" -f $_.Connection, $_.Sni)
+                    $newRunspace = New-CertCheckRunspace -Connection $_.Connection -Sni $_.Sni -TimeoutSec $State.TimeoutSec
+                    $inProgressList.Add($newRunspace)
+                }
+            } else {
+                # Otherwise, we'll just add them back in to the inprogress list
+                $hungList | ForEach-Object { $inProgressList.Add($_) }
+            }
+
+            $State.runspaces = $inProgressList
+            $State.Hung = $hungList.Count
+
+            # Process completed runspaces
+            $completeList | ForEach-Object {
+                $runspace = $_
+
+                # Record completed job
+                $State.Completed++
+
+                # Try to receive the job output, being the HashTable containing
+                # the properties for the check
+                try {
+                    $result = $runspace.Runspace.EndInvoke($runspace.Status) | ForEach-Object {
+                        # Filter out anything that isn't a hashtable, but report on it
+                        if ($_.GetType().FullName -ne "System.Collections.Hashtable")
+                        {
+                            Write-Warning "Runspace returned additional data: $_"
+                        } else {
+                            $_
+                        }
+                    }
+
+                    # Make sure we have a single Hashtable
+                    $count = ($result | Measure-Object).Count
+                    if ($count -ne 1)
+                    {
+                        Write-Error "Runspace returned $count Hashtables, should be 1"
+                    }
+
+                    # Pass the Hashtable on in the pipeline
+                    if ($State.AsHashTable)
+                    {
+                        $result
+                    } else {
+                        [PSCustomObject]$result
+                    }
+                } catch {
+                    Write-Warning "Error reading return from runspace: $_"
+                    Write-Warning ($_ | Format-List -property * | Out-String)
+                }
+
+                # Make sure we remove the runspace now
+                $runspace.Runspace.Dispose()
+                $runspace.Runspace = $null
+                $runspace.Status = $null
+            }
+
+            # Progress status
+            $status = New-CertCheckProgressMessage -State $State
+
+            # Write progress update
+            Write-Progress -Id 1 -Activity "Endpoint Check" -Status $status
+
+            if ($State.LogProgressSec -gt 0 -and $State.LastProgress.AddSeconds($State.LogProgressSec) -lt [DateTime]::UtcNow)
+            {
+                $State.LastProgress = [DateTime]::UtcNow
+                Write-Information "Endpoint Check Status: $status"
+            }
+
+            Start-Sleep -Seconds 1
+        }
+
+        # If we're to log progress, the target is 0 and we've finished the wait loop, then log a final progress
+        if ($State.LogProgressSec -gt 0 -and $target -eq 0)
+        {
+            $status = New-CertCheckProgressMessage -State $State
+            Write-Information "Endpoint Check Status: $status"
+        }
+    }
+}
+
+<#
+#>
+Function New-CertCheckProgressMessage
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [PSCustomObject]$State
+    )
+
+    process
+    {
+        $runtime = ([DateTime]::UtcNow - $State.BeginTime).TotalSeconds
+        $endpointsps = [Math]::Round($State.Completed / $runtime, 2)
+        $status = ("Completed {0}/In Progress {1}/Hung {2}/Runtime {3} seconds/{4} p/s" -f $State.Completed,
+            $State.runspaces.Count, $State.Hung, [Math]::Round($runtime, 2), $endpointsps)
+
+        $status
     }
 }
