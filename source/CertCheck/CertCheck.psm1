@@ -274,7 +274,7 @@ Function Test-EndpointCertificate
         $beginTime = [DateTime]::UtcNow
 
         # Hang threshold
-        $hangThresholdSec = $TimeoutSec * 2
+        $hangThresholdSec = $TimeoutSec * 3
         if ($hangThresholdSec -lt 60)
         {
             $hangThresholdSec = 60
